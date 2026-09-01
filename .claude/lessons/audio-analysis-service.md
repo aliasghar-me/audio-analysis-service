@@ -62,3 +62,30 @@ effect. Use `docker compose build` with no arguments.
 `<audio>` never reaches `loadedmetadata` there — even a 44-byte silent WAV
 data-URI times out — so `0:00 / 0:00` is not an app bug. Check with a known-good
 data-URI control before investigating the server.
+
+## Chasing 100% coverage finds dead code, not just missing tests
+
+Every gap that could not be covered turned out to be code that should not have
+existed: a method nothing called, a `src/` export only tests used, and two
+`.catch()` swallows that made the caller's own error handling unreachable. When
+a branch is hard to reach, ask whether it should exist before reaching for a
+mock — and never add an injectable seam purely to satisfy a coverage number.
+
+`music-metadata`'s `parseBuffer` never throws for malformed input; it resolves
+with an empty format. Any `catch` around it is unreachable. The container check
+in `toFacts` is what rejects a WAV or a PDF.
+
+Vitest 4: coverage across several suites has to come from one run with
+`projects`, not several runs — there is no merge step here.
+
+## CI needs TWO Postgres services
+
+`test/setup.ts` refuses to run when `TEST_DATABASE_URL` equals `DATABASE_URL`,
+which is a guard worth keeping. A CI job with a single service trips it and
+fails on the first build.
+
+## `pnpm audit` flags Prisma's transitive drivers
+
+`@prisma/client -> prisma` pulls `mysql2` and `deepmerge-ts`. Neither is
+reachable from a Postgres-only service, but `pnpm.overrides` pins them to
+patched versions, which is cheaper than re-explaining the advisory every time.
