@@ -12,7 +12,8 @@ import { defineConfig } from 'vitest/config';
  *   pnpm test:unit          fast, no database
  *   pnpm test:integration   real Postgres, real filesystem
  *   pnpm test:security      the security suite as its own gate
- *   pnpm test:coverage      all three, with the 100% gate enforced
+ *   pnpm test:large         real 50 MB payloads; slow, so it is opt-in
+ *   pnpm test:coverage      unit + security + integration, with the 100% gate
  */
 export default defineConfig({
   test: {
@@ -40,6 +41,18 @@ export default defineConfig({
           include: ['test/security/**/*.spec.ts'],
           setupFiles: ['./test/setup.ts'],
           pool: 'forks',
+        },
+      },
+      {
+        test: {
+          // Slow by nature: real 50 MB payloads. Excluded from the default
+          // runs and from coverage; it has its own script and its own CI job.
+          name: 'large',
+          environment: 'node',
+          include: ['test/large/**/*.spec.ts'],
+          setupFiles: ['./test/setup.ts'],
+          pool: 'forks',
+          testTimeout: 120_000,
         },
       },
       {

@@ -1,5 +1,6 @@
 import { readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import FormData from 'form-data';
 import type { FastifyInstance, InjectOptions } from 'fastify';
 import { buildApp } from '../../src/app.js';
@@ -105,5 +106,42 @@ export function uploadRequest(
     url: '/api/upload',
     payload: form.getBuffer(),
     headers: form.getHeaders(),
+  };
+}
+
+/**
+ * A multipart upload whose body is a *stream*, for payloads that must never be
+ * held in memory.
+ *
+ * `uploadRequest` builds the whole body as one Buffer, which is fine at test
+ * sizes and self-defeating at 50 MB — a test asserting the service streams
+ * cannot itself materialise the file. `light-my-request` accepts a
+ * `NodeJS.ReadableStream` as the payload, so the envelope is assembled around
+ * the file stream rather than around its bytes.
+ */
+export function streamingUploadRequest(
+  file: Readable,
+  options: { filename?: string; contentType?: string; field?: string } = {},
+): InjectOptions {
+  const boundary = `----audio-analysis-${Math.random().toString(36).slice(2)}`;
+  const preamble = Buffer.from(
+    `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="${options.field ?? 'file'}"; ` +
+      `filename="${options.filename ?? 'large.mp3'}"\r\n` +
+      `Content-Type: ${options.contentType ?? 'audio/mpeg'}\r\n\r\n`,
+  );
+  const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`);
+
+  async function* body() {
+    yield preamble;
+    for await (const chunk of file) yield chunk as Buffer;
+    yield epilogue;
+  }
+
+  return {
+    method: 'POST',
+    url: '/api/upload',
+    payload: Readable.from(body()),
+    headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
   };
 }

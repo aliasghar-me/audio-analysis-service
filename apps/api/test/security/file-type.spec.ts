@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { buildTestHarness, uploadRequest, type TestHarness } from '../helpers/app.js';
+import { synthesizeMp3 } from '../helpers/synthesize-mp3.js';
 
 /**
  * P0: the file must be an MP3 because its bytes say so, never because its name
@@ -70,5 +71,52 @@ describe('content is what decides, never the name', () => {
     expect(await harness.db.upload.count()).toBe(0);
     expect(await harness.storedFiles()).toHaveLength(0);
     expect(await harness.stagedFiles()).toHaveLength(0);
+  });
+});
+
+describe('MPEG-2 and MPEG-2.5 are accepted end to end', () => {
+  let harness: TestHarness;
+
+  beforeAll(async () => {
+    harness = await buildTestHarness();
+  });
+  afterAll(async () => {
+    await harness.close();
+  });
+  beforeEach(async () => {
+    await harness.truncate();
+  });
+
+  it.each([
+    ['MPEG-2 at 22.05 kHz', { sampleRate: 22_050 as const, bitrateKbps: 64 as const }, 22_050],
+    ['MPEG-2 at 16 kHz', { sampleRate: 16_000 as const, bitrateKbps: 32 as const }, 16_000],
+    ['MPEG-2.5 at 11.025 kHz', { sampleRate: 11_025 as const, bitrateKbps: 32 as const }, 11_025],
+    ['MPEG-2.5 at 8 kHz', { sampleRate: 8_000 as const, bitrateKbps: 16 as const }, 8_000],
+  ])('accepts %s and scores it', async (_label, opts, sampleRateHz) => {
+    // The sniffer accepts the 0xF3 / 0xE3 version bits in isolation; this is
+    // the proof that a whole file at those rates survives the real pipeline.
+    const response = await harness.app.inject(
+      uploadRequest(synthesizeMp3({ ...opts, frames: 800 }), { filename: 'lowrate.mp3' }),
+    );
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json().analysis.format.sampleRateHz).toBe(sampleRateHz);
+    expect(response.json().analysis.quality.score).toBeGreaterThanOrEqual(1);
+    expect(await harness.db.upload.count()).toBe(1);
+  });
+
+  it('scores the low sample-rate tiers below CD quality, through a real parse', async () => {
+    const scoreOf = async (opts: Parameters<typeof synthesizeMp3>[0]) => {
+      await harness.truncate();
+      const r = await harness.app.inject(uploadRequest(synthesizeMp3({ ...opts, frames: 800 })));
+      return r.json().analysis.quality.breakdown.sampleRate as number;
+    };
+
+    // These two tiers were previously reachable only by passing numbers
+    // straight to the scoring function; no real file had ever produced them.
+    expect(await scoreOf({ sampleRate: 44_100 })).toBe(2.5);
+    expect(await scoreOf({ sampleRate: 32_000 })).toBe(1.5);
+    expect(await scoreOf({ sampleRate: 22_050, bitrateKbps: 64 })).toBe(1);
+    expect(await scoreOf({ sampleRate: 11_025, bitrateKbps: 32 })).toBe(0.5);
   });
 });

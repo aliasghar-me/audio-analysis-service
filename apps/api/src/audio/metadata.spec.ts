@@ -34,6 +34,32 @@ describe('readAudioFactsFromBuffer', () => {
     expect(facts.durationMs).toBeCloseTo(expectedDurationMs(300, 48_000), 3);
   });
 
+  it.each([
+    [
+      'MPEG-2 at 22.05 kHz',
+      { sampleRate: 22_050 as const, bitrateKbps: 64 as const },
+      22_050,
+      64_000,
+    ],
+    ['MPEG-2 at 16 kHz', { sampleRate: 16_000 as const, bitrateKbps: 32 as const }, 16_000, 32_000],
+    [
+      'MPEG-2.5 at 11.025 kHz',
+      { sampleRate: 11_025 as const, bitrateKbps: 32 as const },
+      11_025,
+      32_000,
+    ],
+    ['MPEG-2.5 at 8 kHz', { sampleRate: 8_000 as const, bitrateKbps: 16 as const }, 8_000, 16_000],
+  ])('reads %s', async (_label, opts, sampleRateHz, bitrateBps) => {
+    // These rates are unreachable on MPEG-1, and they are where the two lowest
+    // sample-rate scoring tiers live.
+    const facts = await readAudioFactsFromBuffer(synthesizeMp3({ ...opts, frames: 400 }));
+
+    expect(facts.sampleRateHz).toBe(sampleRateHz);
+    expect(facts.bitrateBps).toBe(bitrateBps);
+    expect(facts.codec).toMatch(/Layer 3/);
+    expect(facts.durationMs).toBeCloseTo(expectedDurationMs(400, sampleRateHz), 0);
+  });
+
   it('sees past an ID3v2 tag to the frames behind it', async () => {
     const facts = await readAudioFactsFromBuffer(synthesizeMp3({ frames: 100, withId3: true }));
     expect(facts.durationMs).toBeCloseTo(expectedDurationMs(100, 44_100), 3);
