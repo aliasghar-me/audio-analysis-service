@@ -72,6 +72,85 @@ describe('scoreQuality', () => {
     expect(scoreQuality(withArt).breakdown.consistency).toBeGreaterThan(0);
   });
 
+  // Asserting the rounded 1-10 score cannot see a tier boundary move: a 0.5
+  // shift in one component usually rounds back to the same integer. These
+  // assert the component, which is where the thresholds actually live.
+  it.each([
+    ['320 kbps exactly', 320_000, 4],
+    ['just under 320', 319_000, 3.5],
+    ['256 exactly', 256_000, 3.5],
+    ['just under 256', 255_000, 3],
+    ['192 exactly', 192_000, 3],
+    ['just under 192', 191_000, 2.5],
+    ['160 exactly', 160_000, 2.5],
+    ['just under 160', 159_000, 2],
+    ['128 exactly', 128_000, 2],
+    ['just under 128', 127_000, 1.25],
+    ['96 exactly', 96_000, 1.25],
+    ['just under 96', 95_000, 0.75],
+    ['64 exactly', 64_000, 0.75],
+    ['just under 64', 63_000, 0.25],
+    ['8 kbps', 8_000, 0.25],
+  ])('scores the %s bitrate tier', (_label, bitrateBps, expected) => {
+    expect(scoreQuality(input({ bitrateBps })).breakdown.bitrate).toBe(expected);
+  });
+
+  it('treats an unknown bitrate as neutral-low', () => {
+    expect(scoreQuality(input({ bitrateBps: null })).breakdown.bitrate).toBe(1.5);
+  });
+
+  it.each([
+    ['48 kHz exactly', 48_000, 3],
+    ['just under 48 kHz', 47_999, 2.5],
+    ['44.1 kHz exactly', 44_100, 2.5],
+    ['just under 44.1 kHz', 44_099, 1.5],
+    ['32 kHz exactly', 32_000, 1.5],
+    ['just under 32 kHz', 31_999, 1],
+    ['22.05 kHz exactly', 22_050, 1],
+    ['just under 22.05 kHz', 22_049, 0.5],
+  ])('scores the %s boundary', (_label, sampleRateHz, expected) => {
+    expect(scoreQuality(input({ sampleRateHz })).breakdown.sampleRate).toBe(expected);
+  });
+
+  it.each([
+    ['stereo', 2, 1],
+    ['more than stereo', 6, 1],
+    ['mono', 1, 0.5],
+  ])('scores %s channels', (_label, channels, expected) => {
+    expect(scoreQuality(input({ channels })).breakdown.channels).toBe(expected);
+  });
+
+  it('treats unknown channels as neutral, distinct from both stereo and mono', () => {
+    const unknown = scoreQuality(input({ channels: null })).breakdown.channels;
+    expect(unknown).toBe(0.75);
+    expect(unknown).not.toBe(scoreQuality(input({ channels: 2 })).breakdown.channels);
+    expect(unknown).not.toBe(scoreQuality(input({ channels: 1 })).breakdown.channels);
+  });
+
+  it.each([
+    ['VBR', 'VBR' as const, 1],
+    ['CBR', 'CBR' as const, 0.75],
+    ['an undetermined mode', null, 0.5],
+  ])('scores %s encoding', (_label, encodingMode, expected) => {
+    expect(scoreQuality(input({ encodingMode })).breakdown.encodingMode).toBe(expected);
+  });
+
+  it.each([
+    ['a missing bitrate', { bitrateBps: null }],
+    ['a zero duration', { durationMs: 0 }],
+    ['a negative duration', { durationMs: -1 }],
+  ])('declines to judge consistency given %s', (_label, overrides) => {
+    // Both halves of the guard matter independently: neither alone should be
+    // able to stand in for the other.
+    expect(scoreQuality(input(overrides)).breakdown.consistency).toBe(0.75);
+  });
+
+  it('still judges consistency when only one half of the guard would trip', () => {
+    expect(
+      scoreQuality(input({ bitrateBps: 128_000, durationMs: 180_000 })).breakdown.consistency,
+    ).toBe(1);
+  });
+
   it.each([
     ['48 kHz', 48_000, 3],
     ['44.1 kHz', 44_100, 2.5],

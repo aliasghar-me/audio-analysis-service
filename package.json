@@ -16,6 +16,7 @@
     "test:integration": "pnpm --filter @audio/api test:integration",
     "test:security": "pnpm --filter @audio/api test:security",
     "test:large": "pnpm --filter @audio/api test:large",
+    "test:mutation": "pnpm --filter @audio/api test:mutation",
     "test:coverage": "pnpm --filter @audio/api test:coverage",
     "typecheck": "pnpm --filter \"./apps/*\" typecheck",
     "lint": "eslint . --max-warnings 0",

@@ -89,3 +89,44 @@ fails on the first build.
 `@prisma/client -> prisma` pulls `mysql2` and `deepmerge-ts`. Neither is
 reachable from a Postgres-only service, but `pnpm.overrides` pins them to
 patched versions, which is cheaper than re-explaining the advisory every time.
+
+## MPEG version changes three things at once
+
+The version bits select the sample-rate table, the bitrate table, **and** the
+samples-per-frame count (1152 on MPEG-1, 576 on MPEG-2 and 2.5). Frame size is
+`floor(144*br/sr)` on MPEG-1 and `floor(72*br/sr)` below it. Get one right and
+the others wrong and the file still parses — with a plausible but wrong
+duration. Header byte 1: `0xFB` MPEG-1, `0xF3` MPEG-2, `0xE3` MPEG-2.5.
+
+## Measuring "does not buffer" needs the right metric, and a control
+
+- `heapUsed` cannot see it: Node Buffers are off-heap. ~1 MB either way.
+- `rss` is page retention: it grew to 113% of the payload _while streaming_.
+- `arrayBuffers` counts the right allocations but includes uncollected ones, so
+  the absolute figure tracks GC state — the same upload measured 9 MB clean,
+  29 MB in a fresh worker, 51 MB in a worker that had already streamed four.
+
+So assert a **ratio**, not a number: buffer and stream the same payload in the
+same process and compare peaks. Keep the test alone in its file, because Vitest
+forks per file and a polluted worker reports earlier uploads as this one's cost.
+
+## Stryker's vitest runner cannot select a `projects` entry
+
+There is no `project` option — pointing it at a multi-project config re-runs
+every suite per mutant. Give it a flat `vitest.mutation.config.ts` with only the
+unit tests.
+
+## Mutation testing finds what coverage cannot
+
+Two real defects behind 100% branch coverage here:
+
+- `presenter.ts` scored 15%. It was only ever checked through integration tests
+  asserting fields on a response; nothing tested the mapping, so replacing its
+  whole return value with `{}` survived.
+- Every bitrate-tier mutant survived because the tests asserted the rounded
+  1-10 score, and rounding absorbs a 0.5 shift in one component. Assert the
+  `breakdown` component at a boundary, not the aggregate.
+
+Read survivors individually before chasing them: most of the remainder here are
+equivalent mutants (removing the comma guard in `range.ts` still returns `none`,
+because the anchored pattern rejects the header anyway).

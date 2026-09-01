@@ -4,6 +4,21 @@ import { parseRangeHeader } from './range.js';
 const SIZE = 1000;
 
 describe('parseRangeHeader', () => {
+  it('tolerates surrounding whitespace', () => {
+    expect(parseRangeHeader('  bytes=0-499  ', SIZE)).toEqual({
+      kind: 'satisfiable',
+      start: 0,
+      end: 499,
+    });
+  });
+
+  it('rejects trailing junk after a well-formed range', () => {
+    // The pattern is anchored at both ends: `bytes=0-10` followed by anything
+    // is not a range we will guess at.
+    expect(parseRangeHeader('bytes=0-10junk', SIZE)).toEqual({ kind: 'none' });
+    expect(parseRangeHeader('bytes=0-10 ; q=1', SIZE)).toEqual({ kind: 'none' });
+  });
+
   it('treats a missing header as no range', () => {
     expect(parseRangeHeader(undefined, SIZE)).toEqual({ kind: 'none' });
     expect(parseRangeHeader('', SIZE)).toEqual({ kind: 'none' });

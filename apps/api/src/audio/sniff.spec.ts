@@ -30,6 +30,34 @@ describe('isMp3', () => {
     expect(isMp3(head)).toBe(false);
   });
 
+  it.each([
+    ['a wrong first byte', bytes(0x00, 0x44, 0x33, 0x03)],
+    ['a wrong second byte', bytes(0x49, 0x00, 0x33, 0x03)],
+    ['a wrong third byte', bytes(0x49, 0x44, 0x00, 0x03)],
+    ['an 0xFF version byte', bytes(0x49, 0x44, 0x33, 0xff)],
+  ])('rejects an ID3 signature with %s', (_label, head) => {
+    // Each byte of "ID3" plus the version sanity check has to matter on its
+    // own — three of four matching is not an ID3 tag.
+    expect(isMp3(head)).toBe(false);
+  });
+
+  it('accepts an ID3 signature that is exactly four bytes long', () => {
+    // The length guard must not reject the shortest complete signature.
+    expect(isMp3(bytes(0x49, 0x44, 0x33, 0x03))).toBe(true);
+  });
+
+  it('accepts a frame sync that is exactly two bytes long', () => {
+    expect(isMp3(bytes(0xff, 0xfb))).toBe(true);
+  });
+
+  it.each([
+    ['a wrong first sync byte', bytes(0x00, 0xfb, 0x90, 0x00)],
+    ['sync bits that do not extend into byte two', bytes(0xff, 0x1b, 0x90, 0x00)],
+  ])('rejects %s even when the later bits look valid', (_label, head) => {
+    // 0x1b carries a valid version and layer; only the sync bits are wrong.
+    expect(isMp3(head)).toBe(false);
+  });
+
   it('accepts an ID3 header followed by garbage', () => {
     // Documents the boundary of this check on purpose: sniffing is a gate, and
     // this file is rejected one step later by the parser, not here.

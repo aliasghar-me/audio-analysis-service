@@ -112,6 +112,10 @@ describe('toEncodingMode', () => {
     ['an empty string', ''],
     ['an unrecognised label', 'ABR'],
     ['a lone V', 'V'],
+    // The V-preset pattern is anchored: a V and a digit somewhere in the
+    // middle of another label is not a LAME preset.
+    ['a V-digit that is not a prefix', 'AV2'],
+    ['a V-digit at the end', 'preset-V2x'.slice(0, 8) + 'V2'],
   ])('leaves %s null rather than guessing', (_label, profile) => {
     expect(toEncodingMode(profile)).toBeNull();
   });
@@ -224,6 +228,15 @@ describe('readAudioFacts', () => {
     await expect(readAudioFacts('/nonexistent/definitely/not/here.mp3', 10)).rejects.toMatchObject({
       code: 'INVALID_AUDIO',
       details: { reason: 'parse_failed' },
+    });
+  });
+
+  it('keeps the underlying failure as the error cause, for the log', () => {
+    // The public message is deliberately generic; the real reason has to
+    // survive somewhere, or a genuine filesystem problem becomes unloggable.
+    return readAudioFacts('/nonexistent/definitely/not/here.mp3', 10).catch((error: AppError) => {
+      expect(error.cause).toBeDefined();
+      expect(String(error.cause)).toMatch(/ENOENT|no such file/i);
     });
   });
 });

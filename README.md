@@ -304,10 +304,12 @@ It is a transparent point table rather than a tuned formula on purpose: every nu
 ## Testing
 
 ```bash
-pnpm test:unit          # 222 tests, no database, ~1s
-pnpm test:security      # 50 tests — the security gate, run separately on purpose
-pnpm test:integration   # 65 tests against real Postgres
+pnpm test:unit          # no database, ~1s
+pnpm test:security      # the security gate, run separately on purpose
+pnpm test:integration   # against real Postgres
 pnpm test:coverage      # all three, with the 100% coverage gate enforced
+pnpm test:large         # real 50 MB payloads; slow, so it is opt-in
+pnpm test:mutation      # mutation testing over the pure modules
 pnpm verify             # typecheck + lint + format + test:coverage
 ```
 
@@ -323,6 +325,11 @@ would prove nothing about the concurrency behaviour it exists to check.
 
 **Security** — its own suite (`test/security/`) so a regression there is legible
 in the CI job list rather than buried in a combined run. See below.
+
+**Large** — the 50 MB ceiling at its real size. Every other size test runs at a
+reduced `MAX_UPLOAD_BYTES` to keep the fast suite fast, which left the two
+claims this README actually makes untested: that a 50 MB file is accepted, and
+that the service does not hold one in memory. Its own script and its own CI job.
 
 ### Coverage: 100%, enforced
 
@@ -355,6 +362,44 @@ which carried a `catch` nothing could reach, because `parseBuffer` resolves with
 an empty format for malformed input rather than throwing), and two redundant
 `.catch()` swallows in `FileStore` that made the caller's own error handling
 unreachable. Deleting those was the fix; the coverage was a side effect.
+
+### Mutation testing: 92.2%
+
+Coverage says every branch executed. It does not say a test would fail if `>`
+became `>=`, and this service's scoring thresholds and range arithmetic are
+exactly where an off-by-one hides behind a green suite.
+
+`pnpm test:mutation` runs Stryker over the pure modules — `audio/`,
+`http/range.ts`, `http/errors.ts`, `uploads/presenter.ts`. Anything touching
+Postgres or the filesystem is excluded: every mutant re-runs the suite, and
+those mutants mostly prove the database still works.
+
+It started at **82.0%** and found something coverage could not. `presenter.ts`
+scored **15%**: replacing its entire return value with `{}` survived, because it
+had only ever been checked indirectly by integration tests asserting fields on a
+response. Nothing tested the mapping itself — including that it drops
+`storagePath`. It now has its own spec and scores 100%.
+
+The other lesson was about assertion level. Every bitrate-tier mutant survived
+(`>= 320` → `> 320`) because the tests asserted the final 1–10 score, and
+rounding absorbs a 0.5-point shift in one component. The tests now assert the
+`breakdown` component at each boundary, which is where the thresholds live.
+
+|                | start | now       |
+| -------------- | ----- | --------- |
+| overall        | 82.0% | **92.2%** |
+| `presenter.ts` | 15.4% | 100%      |
+| `sniff.ts`     | 71.4% | 95.9%     |
+| `quality.ts`   | 79.8% | 92.1%     |
+| `duration.ts`  | 100%  | 100%      |
+
+The gate breaks below 90%. The ~33 remaining survivors were read individually
+and are predominantly **equivalent mutants** — removing the comma guard in
+`range.ts`, for example, still returns `none`, because the anchored pattern
+rejects a multi-range header anyway. Killing those would mean contorting tests
+around code paths that cannot behave differently, which makes a suite worse.
+Mutation runs weekly and on demand rather than on every push; a slow gate on
+every commit is the over-engineering this project is trying to avoid.
 
 ### Security suite
 
@@ -396,7 +441,9 @@ has no users), and no penetration testing.
 
 It earned its place immediately. A real VBR file reports a **fractional** average bitrate — 96227.979… bps — where every synthetic CBR fixture reports a clean integer. `bitrate_bps` is an integer column, so the service had been relying on the database driver to truncate that silently. It now rounds explicitly, with a test that says so. The same file is also the only thing covering the `V2`-style LAME preset branch of the CBR/VBR detection, since `music-metadata` reports the preset name rather than the literal string `VBR`.
 
-Still not covered: ID3 embedded cover art, MPEG-2/2.5 sample rates, and a Xing header on a stripped file (the tier-three duration fallback is exercised only by unit tests). A broader corpus in CI is on the list below.
+MPEG-2 and MPEG-2.5 are covered too, which is how the low sample rates are reached: the generator takes an MPEG version, and 22.05 / 16 / 11.025 / 8 kHz files go through the real pipeline. That mattered because the version field changes three things at once — the rate table, the bitrate table, and 576 vs 1152 samples per frame — so getting one right and the others wrong yields a file that parses with a plausible but wrong duration.
+
+Still not covered: ID3 embedded cover art, and a Xing header on a stripped file (the tier-three duration fallback is exercised only by unit tests). A broader corpus of real encodes is on the list below.
 
 ---
 
@@ -404,7 +451,7 @@ Still not covered: ID3 embedded cover art, MPEG-2/2.5 sample rates, and a Xing h
 
 Roughly in order of value:
 
-1. **A broader real-file corpus** — the one committed CC0 file covers VBR, a real encoder and a real ID3 tag, but not cover art, MPEG-2/2.5 rates, or a stripped Xing header. A small cached set of CC0 files across those axes is the remaining test gap.
+1. **A broader real-file corpus** — the one committed CC0 file covers VBR, a real encoder and a real ID3 tag, but not cover art or a stripped Xing header. MPEG-2/2.5 rates are now covered by synthesised fixtures, but not by real encodes. A small cached set of CC0 files across those axes is the remaining test gap.
 2. **Async analysis behind a queue** — `POST` returns `202` with a `PENDING → READY` status. Matters as soon as parsing gets slower or files get bigger; today the analysis is fast enough that the synchronous path is the simpler correct answer.
 3. **Object storage** behind the existing `FileStore` interface, which is the change that unblocks running more than one API instance.
 4. **`storage:gc`** — reconcile the store against `SELECT content_hash` and delete orphans, closing the one failure mode this design deliberately accepts.

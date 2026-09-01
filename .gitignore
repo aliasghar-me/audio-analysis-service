@@ -2,6 +2,8 @@ node_modules/
 dist/
 .next/
 coverage/
+reports/
+.stryker-tmp/
 *.tsbuildinfo
 
 # Local env. .env.example is the committed reference.

@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Mutation testing weekly rather than per-push: it is slow, and a slow gate
+    # on every commit is exactly the over-engineering this project avoids.
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
 
 jobs:
   verify:
@@ -72,3 +77,56 @@ jobs:
         with:
           name: coverage
           path: apps/api/coverage/
+
+  # Real 50 MB payloads. Separate job so the fast feedback loop stays fast,
+  # but still enforced on every push.
+  large-uploads:
+    runs-on: ubuntu-latest
+    services:
+      postgres-test:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: audio
+          POSTGRES_PASSWORD: audio
+          POSTGRES_DB: audio_analysis_test
+        ports: ['5496:5432']
+        options: >-
+          --health-cmd "pg_isready -U audio -d audio_analysis_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://audio:audio@localhost:5495/audio_analysis?schema=public
+      TEST_DATABASE_URL: postgresql://audio:audio@localhost:5496/audio_analysis_test?schema=public
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:large
+
+  # Coverage proves every branch ran; this proves a test would fail if one
+  # changed. Weekly and on demand, never blocking a pull request.
+  mutation:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @audio/api exec prisma generate
+      - run: pnpm --filter @audio/api test:mutation
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-report
+          path: apps/api/reports/
