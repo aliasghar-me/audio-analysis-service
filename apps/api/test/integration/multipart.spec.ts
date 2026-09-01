@@ -100,6 +100,9 @@ describe('multipart handling', () => {
       expect(response.json().error.code).toBe('TOO_MANY_FILES');
       expect(await harness.db.upload.count()).toBe(0);
       expect(await harness.storedFiles()).toHaveLength(0);
+      // The first file was staged before the second one was seen. If it is
+      // still in tmp/, every rejected multi-file upload leaks a temp file.
+      expect(await harness.stagedFiles()).toHaveLength(0);
     });
 
     it('rejects many file parts instead of hanging', async () => {
@@ -108,6 +111,7 @@ describe('multipart handling', () => {
       expect(response.statusCode).toBe(400);
       expect(response.json().error.code).toBe('TOO_MANY_FILES');
       expect(await harness.db.upload.count()).toBe(0);
+      expect(await harness.stagedFiles()).toHaveLength(0);
     });
 
     it('accepts exactly one file part', async () => {
@@ -165,6 +169,7 @@ describe('multipart handling', () => {
       expect(response.statusCode).toBe(400);
       expect(response.json().error.code).toBe('INVALID_AUDIO');
       expect(await harness.db.upload.count()).toBe(0);
+      expect(await harness.stagedFiles()).toHaveLength(0);
     });
 
     it('accepts a file exactly at the configured limit', async () => {

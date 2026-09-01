@@ -15,6 +15,9 @@ export interface TestHarness {
   truncate(): Promise<void>;
   /** Every stored audio file, relative to the storage root. */
   storedFiles(): Promise<string[]>;
+  /** Anything left in the staging directory. Should always be empty once a
+   *  request has finished, whether it succeeded or was rejected. */
+  stagedFiles(): Promise<string[]>;
   close(): Promise<void>;
 }
 
@@ -64,6 +67,14 @@ export async function buildTestHarness(overrides: Partial<Env> = {}): Promise<Te
       }
       await walk(root);
       return found.sort();
+    },
+
+    async stagedFiles() {
+      try {
+        return (await readdir(path.join(storageDir, 'tmp'))).sort();
+      } catch {
+        return [];
+      }
     },
 
     async close() {

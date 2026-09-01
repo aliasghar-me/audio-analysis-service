@@ -72,6 +72,7 @@ describe('content is what decides, never the name', () => {
     expect(response.json().error.code).toBe('INVALID_AUDIO');
     expect(await harness.db.upload.count()).toBe(0);
     expect(await harness.storedFiles()).toHaveLength(0);
+    expect(await harness.stagedFiles()).toHaveLength(0);
   });
 });
 
