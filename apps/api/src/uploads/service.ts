@@ -6,7 +6,7 @@ import { isDurationOutlier, type OutlierPolicy } from '../audio/duration.js';
 import { scoreQuality } from '../audio/quality.js';
 import { isMp3 } from '../audio/sniff.js';
 import { AppError, isUniqueViolation } from '../http/errors.js';
-import type { FileStore } from '../storage/store.js';
+import type { FileStore, StagedFile } from '../storage/store.js';
 import type { UploadsRepository } from './repository.js';
 import { toUploadResult, type UploadResult } from './presenter.js';
 
@@ -16,6 +16,21 @@ export interface IngestRequest {
   mimetype: string | undefined;
   /** Whether the multipart layer cut the stream short at the size limit. */
   wasTruncated: () => boolean;
+}
+
+/**
+ * An upload whose bytes are on disk under a temporary name and have passed the
+ * cheap checks, but which has not been analysed, stored or recorded yet.
+ *
+ * Staging is a separate step so the route can finish reading the multipart body
+ * — and reject a request carrying a second file — before anything is committed.
+ * Doing the whole ingest inline would insert a row for the first file and only
+ * then discover the request was invalid.
+ */
+export interface StagedUpload {
+  file: StagedFile;
+  submittedFilename: string;
+  declaredMime: string;
 }
 
 export interface IngestOutcome {
@@ -54,23 +69,18 @@ export class UploadsService {
   constructor(private readonly deps: UploadsServiceDeps) {}
 
   /**
-   * The upload pipeline. The order of these steps is the design:
+   * Read the body to disk and apply the cheap rejections.
    *
-   *   stream + hash → size checks → sniff → duplicate short-circuit → parse →
-   *   analyse → commit bytes → insert row
-   *
-   * Hashing before parsing is what makes a duplicate the cheapest possible
-   * path: no re-analysis, and not one byte written twice. Committing bytes
-   * before inserting the row is a deliberate choice of failure mode — a file
-   * with no row is invisible garbage that the next identical upload reclaims,
-   * whereas a row with no file is a broken record served to clients.
+   * Streaming rather than buffering: the hash has to be known before we can
+   * decide whether the bytes are worth keeping, and holding a 50 MB body per
+   * concurrent request in memory is the first thing that falls over under load.
    */
-  async ingest(request: IngestRequest): Promise<IngestOutcome> {
-    const { repository, store, outlierPolicy, maxUploadBytes, logger } = this.deps;
+  async stage(request: IngestRequest): Promise<StagedUpload> {
+    const { store, maxUploadBytes } = this.deps;
     const submittedFilename = sanitizeFilename(request.filename);
     const declaredMime = (request.mimetype ?? 'application/octet-stream').slice(0, 127);
 
-    const staged = await store.stage(request.stream);
+    const file = await store.stage(request.stream);
 
     try {
       // Busboy ends a stream that hits the size limit rather than erroring, so
@@ -81,19 +91,54 @@ export class UploadsService {
         });
       }
 
-      if (staged.bytes === 0) {
+      if (file.bytes === 0) {
         throw new AppError('EMPTY_FILE', 'The uploaded file is empty.');
       }
 
       // Cheap gate before the expensive parse. The filename and the declared
       // MIME type are client-supplied strings and decide nothing.
-      if (!isMp3(staged.head)) {
+      if (!isMp3(file.head)) {
         throw new AppError('INVALID_AUDIO', 'The uploaded file is not a valid MP3 audio file.', {
           reason: 'magic_bytes',
         });
       }
+    } catch (error) {
+      await this.discard({ file, submittedFilename, declaredMime });
+      throw error;
+    }
 
-      const existing = await repository.findByContentHash(staged.hash);
+    return { file, submittedFilename, declaredMime };
+  }
+
+  /** Drop staged bytes that will never be committed. Never throws. */
+  async discard(staged: StagedUpload): Promise<void> {
+    await this.deps.store.discard(staged.file.tempPath).catch((error: unknown) => {
+      this.deps.logger.warn(
+        { err: error, tempPath: staged.file.tempPath },
+        'failed to clean up staged upload',
+      );
+    });
+  }
+
+  /**
+   * Analyse, store and record a staged upload. The order of these steps is the
+   * design:
+   *
+   *   duplicate short-circuit → parse → analyse → commit bytes → insert row
+   *
+   * Hashing before parsing (done in `stage`) is what makes a duplicate the
+   * cheapest possible path: no re-analysis, and not one byte written twice.
+   * Committing bytes before inserting the row is a deliberate choice of failure
+   * mode — a file with no row is invisible garbage that the next identical
+   * upload reclaims, whereas a row with no file is a broken record served to
+   * clients.
+   */
+  async finalize(staged: StagedUpload): Promise<IngestOutcome> {
+    const { repository, store, outlierPolicy } = this.deps;
+    const { file, submittedFilename, declaredMime } = staged;
+
+    try {
+      const existing = await repository.findByContentHash(file.hash);
       if (existing) {
         const updated = await repository.registerDuplicate(existing.id);
         return {
@@ -102,25 +147,25 @@ export class UploadsService {
         };
       }
 
-      const facts = await readAudioFacts(staged.tempPath, staged.bytes);
+      const facts = await readAudioFacts(file.tempPath, file.bytes);
       const isOutlier = isDurationOutlier(facts.durationMs, outlierPolicy);
       const quality = scoreQuality({
         bitrateBps: facts.bitrateBps,
         sampleRateHz: facts.sampleRateHz,
         channels: facts.channels,
         encodingMode: facts.encodingMode,
-        sizeBytes: staged.bytes,
+        sizeBytes: file.bytes,
         durationMs: facts.durationMs,
       });
 
-      const storagePath = await store.commit(staged.hash, staged.tempPath);
+      const storagePath = await store.commit(file.hash, file.tempPath);
 
       try {
         const row = await repository.create({
-          contentHash: staged.hash,
+          contentHash: file.hash,
           originalName: submittedFilename,
           declaredMime,
-          sizeBytes: staged.bytes,
+          sizeBytes: file.bytes,
           storagePath,
           durationMs: Math.round(facts.durationMs),
           isOutlier,
@@ -147,7 +192,7 @@ export class UploadsService {
         // constraint, not the lookup above, is what makes this impossible to
         // get wrong: both requests converge on the same duplicate response.
         if (isUniqueViolation(error, 'contentHash')) {
-          const winner = await repository.findByContentHash(staged.hash);
+          const winner = await repository.findByContentHash(file.hash);
           if (winner) {
             const updated = await repository.registerDuplicate(winner.id);
             return {
@@ -167,18 +212,22 @@ export class UploadsService {
         // Note the deliberate asymmetry with the branch above — a P2002 loser
         // must NOT delete the file, because the winner's row addresses exactly
         // these bytes.
-        const claimed = await repository.findByContentHash(staged.hash).catch(() => null);
+        const claimed = await repository.findByContentHash(file.hash).catch(() => null);
         if (!claimed) {
-          await store.remove(staged.hash);
+          await store.remove(file.hash);
         }
         throw error;
       }
     } finally {
       // Covers every rejection path above; a successful commit has already
       // renamed the file away, so this is a no-op there.
-      await store.discard(staged.tempPath).catch((error: unknown) => {
-        logger.warn({ err: error, tempPath: staged.tempPath }, 'failed to clean up staged upload');
-      });
+      await this.discard(staged);
     }
+  }
+
+  /** Stage and finalize in one call. Convenience for callers with no need to
+   *  inspect the rest of the multipart body. */
+  async ingest(request: IngestRequest): Promise<IngestOutcome> {
+    return this.finalize(await this.stage(request));
   }
 }

@@ -73,6 +73,25 @@ Content-Type: audio/mpeg
 < /tmp/song.mp3
 ------boundary--
 
+### Two file parts — 400 TOO_MANY_FILES (must answer, not hang)
+POST {{api}}/api/upload
+Content-Type: multipart/form-data; boundary=----boundary
+
+------boundary
+Content-Disposition: form-data; name="file"; filename="a.mp3"
+Content-Type: audio/mpeg
+
+< /tmp/song.mp3
+------boundary
+Content-Disposition: form-data; name="file"; filename="b.mp3"
+Content-Type: audio/mpeg
+
+< /tmp/song.mp3
+------boundary--
+
+### Wrong method on an existing path — 404 ROUTE_NOT_FOUND
+GET {{api}}/api/upload
+
 ### Not multipart at all — 415 UNSUPPORTED_MEDIA_TYPE
 POST {{api}}/api/upload
 Content-Type: application/json

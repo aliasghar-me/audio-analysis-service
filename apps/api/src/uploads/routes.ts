@@ -6,7 +6,7 @@ import type { FileStore } from '../storage/store.js';
 import { toUploadView } from './presenter.js';
 import type { UploadsRepository } from './repository.js';
 import { listUploadsQuery, uploadIdParams } from './schemas.js';
-import type { UploadsService } from './service.js';
+import type { StagedUpload, UploadsService } from './service.js';
 
 export interface UploadRoutesDeps {
   service: UploadsService;
@@ -36,28 +36,50 @@ export async function registerUploadRoutes(
    * `duplicate` flag still gets a correct, useful answer.
    */
   app.post('/api/upload', async (request, reply) => {
-    const part = await request.file();
-    if (!part) {
+    // Iterating the parts rather than taking `request.file()` and returning:
+    // it is the only way to see whether a second file part follows, and it
+    // lets that be rejected before anything has been analysed or recorded.
+    let staged: StagedUpload | null = null;
+
+    try {
+      for await (const part of request.parts()) {
+        if (part.type !== 'file') continue;
+
+        // `request.parts()` yields every file part whatever it is called.
+        // Naming the expected field turns a silent "why is my upload empty"
+        // into a message a client can act on.
+        if (part.fieldname !== 'file') {
+          throw new AppError(
+            'NO_FILE',
+            `Expected the file in a form field named "file", but found "${part.fieldname}".`,
+            { expectedField: 'file', receivedField: part.fieldname },
+          );
+        }
+
+        if (staged) {
+          throw new AppError('TOO_MANY_FILES', 'Only one file may be uploaded per request.', {
+            maxFiles: 1,
+          });
+        }
+
+        staged = await service.stage({
+          stream: part.file,
+          filename: part.filename,
+          mimetype: part.mimetype,
+          wasTruncated: () => part.file.truncated,
+        });
+      }
+    } catch (error) {
+      // Anything staged before the failure is bytes nobody will ever reference.
+      if (staged) await service.discard(staged);
+      throw error;
+    }
+
+    if (!staged) {
       throw new AppError('NO_FILE', 'No file was included in the request.');
     }
 
-    // `request.file()` hands back the first file part whatever it is called.
-    // Naming the expected field turns a silent "why is my upload empty" into a
-    // message a client can act on.
-    if (part.fieldname !== 'file') {
-      throw new AppError(
-        'NO_FILE',
-        `Expected the file in a form field named "file", but found "${part.fieldname}".`,
-        { expectedField: 'file', receivedField: part.fieldname },
-      );
-    }
-
-    const { created, result } = await service.ingest({
-      stream: part.file,
-      filename: part.filename,
-      mimetype: part.mimetype,
-      wasTruncated: () => part.file.truncated,
-    });
+    const { created, result } = await service.finalize(staged);
 
     if (created) {
       reply.header('location', `/api/uploads/${result.upload.id}`);

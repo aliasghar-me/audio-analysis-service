@@ -66,6 +66,26 @@ describe('duplicate detection', () => {
     expect(row.originalName).toBe('take-0.mp3');
   });
 
+  it.each([
+    ['the same name again', 'midnight-drive.mp3', 'audio/mpeg'],
+    ['a different case', 'MIDNIGHT-DRIVE.MP3', 'audio/mpeg'],
+    ['a unicode name', '歌曲-副本.mp3', 'audio/mpeg'],
+    ['an emoji name', '🎵.mp3', 'audio/mpeg'],
+    ['a different declared type', 'blob.bin', 'application/octet-stream'],
+  ])('detects the same bytes submitted under %s', async (_label, filename, contentType) => {
+    const mp3 = synthesizeMp3({ frames: 900 });
+    const first = await harness.app.inject(uploadRequest(mp3, { filename: 'midnight-drive.mp3' }));
+    expect(first.statusCode).toBe(201);
+
+    const second = await harness.app.inject(uploadRequest(mp3, { filename, contentType }));
+
+    expect(second.statusCode).toBe(200);
+    expect(second.json().duplicate).toBe(true);
+    expect(second.json().originalUploadId).toBe(first.json().upload.id);
+    expect(await harness.db.upload.count()).toBe(1);
+    expect(await harness.storedFiles()).toHaveLength(1);
+  });
+
   it('treats different content under the same filename as two uploads', async () => {
     const name = 'track.mp3';
     const a = await harness.app.inject(
@@ -100,11 +120,12 @@ describe('duplicate detection', () => {
   it('survives concurrent uploads of identical bytes', async () => {
     const mp3 = synthesizeMp3({ frames: 1200 });
 
-    // All five race past the findUnique fast path. The unique constraint on
+    // All ten race past the findUnique fast path. The unique constraint on
     // contentHash — not that lookup — is what makes this safe, and this is the
     // test that proves it.
+    const CONCURRENCY = 10;
     const responses = await Promise.all(
-      Array.from({ length: 5 }, (_, i) =>
+      Array.from({ length: CONCURRENCY }, (_, i) =>
         harness.app.inject(uploadRequest(mp3, { filename: `racer-${i}.mp3` })),
       ),
     );
@@ -113,7 +134,9 @@ describe('duplicate detection', () => {
     const duplicates = responses.filter((r) => r.statusCode === 200);
 
     expect(created).toHaveLength(1);
-    expect(duplicates).toHaveLength(4);
+    expect(duplicates).toHaveLength(CONCURRENCY - 1);
+    // Never a 500: a lost race is an expected outcome, not a server fault.
+    expect(responses.filter((r) => r.statusCode >= 500)).toHaveLength(0);
 
     const ids = new Set(responses.map((r) => r.json().upload.id));
     expect(ids.size).toBe(1);
@@ -122,6 +145,6 @@ describe('duplicate detection', () => {
     expect(await harness.storedFiles()).toHaveLength(1);
 
     const row = await harness.db.upload.findFirstOrThrow();
-    expect(row.duplicateCount).toBe(4);
+    expect(row.duplicateCount).toBe(CONCURRENCY - 1);
   });
 });

@@ -1,4 +1,7 @@
 apps/api/src/generated
+# Regenerated verbatim by `next build`, and the file itself says not to edit it.
+# Formatting it made `pnpm build` break `pnpm format:check` on the next run.
+apps/web/next-env.d.ts
 apps/api/prisma/migrations
 pnpm-lock.yaml
 .next

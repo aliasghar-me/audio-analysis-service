@@ -39,9 +39,14 @@ export async function buildApp({ env, db }: BuildAppOptions): Promise<FastifyIns
   await app.register(multipart, {
     limits: {
       fileSize: env.MAX_UPLOAD_BYTES,
-      files: 1,
       fields: 5,
       parts: 10,
+      // Deliberately NO `files` cap. Busboy trips that limit while the first
+      // file's stream is still open, then stops parsing — the stream never
+      // emits `end`, the handler never returns, and the request hangs with no
+      // response at all. `fileSize` is the one limit that fails cleanly (it
+      // ends the stream and sets `truncated`). "One file per request" is
+      // therefore enforced in the route, where it can produce a real 400.
     },
   });
 

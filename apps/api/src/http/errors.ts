@@ -10,6 +10,10 @@ export const ERROR_STATUS = {
   UNSUPPORTED_MEDIA_TYPE: 415,
   /** Multipart, but with no `file` part in it. */
   NO_FILE: 400,
+  /** More than one file part. One upload per request, by design. */
+  TOO_MANY_FILES: 400,
+  /** The multipart body had more parts or fields than we will parse. */
+  TOO_MANY_PARTS: 413,
   /** A file part with zero bytes. */
   EMPTY_FILE: 400,
   /** Not an MP3. `details.reason` says which check rejected it. */
@@ -19,6 +23,10 @@ export const ERROR_STATUS = {
   /** Route params or query string failed their schema. */
   VALIDATION_ERROR: 400,
   UPLOAD_NOT_FOUND: 404,
+  /** No such route. Distinct from UPLOAD_NOT_FOUND, which means "no upload with
+   *  that id" — a client that retries with a different id would be wasting its
+   *  time on a route that does not exist. */
+  ROUTE_NOT_FOUND: 404,
   /** The row exists but its bytes do not. Deliberately not a 404 — the
    *  resource did exist, and the metadata endpoint still proves it. */
   FILE_GONE: 410,

@@ -156,16 +156,21 @@ Every error uses one envelope:
 | ------------------------ | ------ | ----------------------------------------------------------------------------------------- |
 | `UNSUPPORTED_MEDIA_TYPE` | 415    | the request was not `multipart/form-data`                                                 |
 | `NO_FILE`                | 400    | no file part, or it arrived under the wrong field name                                    |
+| `TOO_MANY_FILES`         | 400    | more than one file part; one upload per request                                           |
 | `EMPTY_FILE`             | 400    | zero bytes                                                                                |
 | `INVALID_AUDIO`          | 400    | `details.reason`: `magic_bytes`, `parse_failed`, `not_mpeg`, `not_layer_3`, `no_duration` |
 | `FILE_TOO_LARGE`         | 413    | over `MAX_UPLOAD_BYTES`; `details.maxBytes` says by what standard                         |
+| `TOO_MANY_PARTS`         | 413    | more multipart parts or fields than we will parse                                         |
 | `VALIDATION_ERROR`       | 400    | bad route param or query string                                                           |
 | `UPLOAD_NOT_FOUND`       | 404    | unknown id                                                                                |
+| `ROUTE_NOT_FOUND`        | 404    | no such route — distinct from an unknown upload id                                        |
 | `FILE_GONE`              | 410    | the row exists, the bytes do not                                                          |
 | `RANGE_NOT_SATISFIABLE`  | 416    | a `Range` past the end of the file; the reply carries `Content-Range: bytes */<size>`     |
 | `INTERNAL_ERROR`         | 500    | a bug; the real error goes to the log only                                                |
 
 `docs/api.http` has ready-to-run requests for every one of these.
+
+**One file per request.** The file must arrive in a form field named `file`, and a second file part is refused with `TOO_MANY_FILES` rather than silently ignored. This is enforced in the route rather than through `@fastify/multipart`'s `limits.files`, and that is not a stylistic preference: busboy trips a `files` cap _while the first file's stream is still open_, then stops parsing, so the stream never ends, the handler never returns, and the request hangs with no response at all. `fileSize` is the one limit that fails cleanly — it ends the stream and sets `truncated`. There are tests asserting the request answers rather than hangs.
 
 ---
 

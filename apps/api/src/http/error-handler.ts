@@ -16,17 +16,38 @@ const MULTIPART_ERRORS: Record<string, { code: ErrorCode; message: string }> = {
     message: 'The uploaded file exceeds the size limit.',
   },
   FST_FILES_LIMIT: {
-    code: 'FILE_TOO_LARGE',
-    message: 'Too many files in one request; upload one file at a time.',
+    code: 'TOO_MANY_FILES',
+    message: 'Only one file may be uploaded per request.',
   },
   FST_PARTS_LIMIT: {
-    code: 'FILE_TOO_LARGE',
+    code: 'TOO_MANY_PARTS',
     message: 'Too many parts in one request.',
   },
   FST_FIELDS_LIMIT: {
-    code: 'FILE_TOO_LARGE',
+    code: 'TOO_MANY_PARTS',
     message: 'Too many fields in one request.',
   },
+};
+
+/**
+ * Fastify's own framework errors already carry the right status — a request
+ * with no Content-Type raises FST_ERR_CTP_INVALID_MEDIA_TYPE with statusCode
+ * 415. Answering those with a blanket 500 would claim a server fault for what
+ * is plainly a malformed client request, and would put a 500 in the logs for
+ * every curl typed without a header.
+ */
+function frameworkStatus(error: unknown): number | null {
+  const status = (error as { statusCode?: unknown }).statusCode;
+  if (typeof status !== 'number') return null;
+  return status >= 400 && status < 500 ? status : null;
+}
+
+const FRAMEWORK_CODE_MESSAGES: Record<number, { code: ErrorCode; message: string }> = {
+  415: {
+    code: 'UNSUPPORTED_MEDIA_TYPE',
+    message: 'This endpoint expects a multipart/form-data request.',
+  },
+  413: { code: 'FILE_TOO_LARGE', message: 'The request body is too large.' },
 };
 
 /**
@@ -67,13 +88,25 @@ export function registerErrorHandler(app: FastifyInstance): void {
       return reply.code(appError.statusCode).send(appError.toEnvelope());
     }
 
+    // A Fastify framework error that already knows it is a 4xx is a client
+    // problem, not ours. Preserve its status rather than flattening to 500.
+    const status = frameworkStatus(error);
+    if (status !== null) {
+      const mapped = FRAMEWORK_CODE_MESSAGES[status];
+      const appError = mapped
+        ? new AppError(mapped.code, mapped.message)
+        : new AppError('VALIDATION_ERROR', 'The request could not be processed as sent.');
+      request.log.info({ err: error, status }, 'malformed request rejected');
+      return reply.code(status).send(appError.toEnvelope());
+    }
+
     request.log.error({ err: error }, 'unhandled error');
     const fallback = new AppError('INTERNAL_ERROR', 'Something went wrong.');
     return reply.code(fallback.statusCode).send(fallback.toEnvelope());
   });
 
   app.setNotFoundHandler((request, reply) => {
-    const error = new AppError('UPLOAD_NOT_FOUND', `No route for ${request.method} ${request.url}`);
-    return reply.code(404).send(error.toEnvelope());
+    const error = new AppError('ROUTE_NOT_FOUND', `No route for ${request.method} ${request.url}`);
+    return reply.code(error.statusCode).send(error.toEnvelope());
   });
 }
