@@ -77,7 +77,7 @@ pnpm db:migrate        # apply migrations to the dev database
 pnpm dev               # API on 4490, UI on 3490
 ```
 
-Then `pnpm verify` — typecheck, lint, format check, and all three test suites with the 100% coverage gate — is the single "is this repo healthy" command. It is exactly what `.github/workflows/ci.yml` runs on every push and pull request, against two Postgres service containers, plus a production dependency audit.
+Then `pnpm verify` — typecheck, lint, format check, and the unit, security and integration suites with the 100% coverage gate — is the single "is this repo healthy" command. `.github/workflows/ci.yml` runs exactly that on every push and pull request, against two Postgres service containers (two, not one: `test/setup.ts` refuses to run when `TEST_DATABASE_URL` equals `DATABASE_URL`), alongside a parallel job for the 50 MB suite and a production dependency audit. Mutation testing runs weekly and on demand.
 
 Requires Node ≥ 22 (developed on 26.7) and pnpm 9.15.9. **No ffmpeg, no native modules, no system audio libraries.**
 
@@ -285,13 +285,13 @@ The fixed window is also defensible on its own terms: this is a service for musi
 
 `scoreQuality()` is a pure function summing five components to a maximum of 10, then clamping to 1–10. The full breakdown is returned in the response _and stored on the row_, so a score is explainable years later even if the table changes.
 
-| Signal               | Max | Scale                                                                                             | Why                                                                                                                                                       |
-| -------------------- | --- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Bitrate**          | 4   | 320k → 4 · 256k → 3.5 · 192k → 3 · 160k → 2.5 · 128k → 2 · 96k → 1.25 · 64k → 0.75 · below → 0.25 | For a fixed codec, the bit budget is the best available proxy for how much of the signal survived. Weighted heaviest for that reason.                     |
-| **Sample rate**      | 3   | ≥48k → 3 · ≥44.1k → 2.5 · ≥32k → 1.5 · ≥22.05k → 1 · below → 0.5                                  | Caps reproducible bandwidth outright (Nyquist). 44.1 kHz is the CD baseline.                                                                              |
-| **Channels**         | 1   | stereo → 1 · mono → 0.5                                                                           | Mono is correct for speech, so the weight is deliberately small.                                                                                          |
-| **Encoding mode**    | 1   | VBR → 1 · CBR → 0.75 · unknown → 0.5                                                              | At equal average bitrate VBR spends bits where they are needed. A small effect next to bitrate itself.                                                    |
-| **Size consistency** | 1   | within 15% of the declared bitrate → 1 · within 80% → 0.5 · otherwise → 0                         | The only component that looks at the _file_ rather than the _header_, and so the only one that can catch a lie: truncated, padded, or mis-declared files. |
+| Signal               | Max | Scale                                                                                             | Why                                                                                                                                                                                                                                                                                                                                                               |
+| -------------------- | --- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Bitrate**          | 4   | 320k → 4 · 256k → 3.5 · 192k → 3 · 160k → 2.5 · 128k → 2 · 96k → 1.25 · 64k → 0.75 · below → 0.25 | For a fixed codec, the bit budget is the best available proxy for how much of the signal survived. Weighted heaviest for that reason.                                                                                                                                                                                                                             |
+| **Sample rate**      | 3   | ≥48k → 3 · ≥44.1k → 2.5 · ≥32k → 1.5 · ≥22.05k → 1 · below → 0.5                                  | Caps reproducible bandwidth outright (Nyquist). 44.1 kHz is the CD baseline.                                                                                                                                                                                                                                                                                      |
+| **Channels**         | 1   | stereo → 1 · mono → 0.5                                                                           | Mono is correct for speech, so the weight is deliberately small.                                                                                                                                                                                                                                                                                                  |
+| **Encoding mode**    | 1   | VBR → 1 · CBR → 0.75 · unknown → 0.5                                                              | At equal average bitrate VBR spends bits where they are needed. A small effect next to bitrate itself.                                                                                                                                                                                                                                                            |
+| **Size consistency** | 1   | ratio 0.85–1.35 → 1 · 0.6–1.8 → 0.5 · outside → 0                                                 | The only component that looks at the _file_ rather than the _header_, and so the only one that can catch a lie: truncated, padded, or mis-declared files. The bands are deliberately asymmetric — ID3 tags and embedded cover art legitimately add bytes that carry no audio, so being larger than the bitrate implies is far less suspicious than being smaller. |
 
 Unknown fields score neutral-low rather than zero — absence of evidence is not evidence of absence.
 
@@ -304,16 +304,19 @@ It is a transparent point table rather than a tuned formula on purpose: every nu
 ## Testing
 
 ```bash
-pnpm test:unit          # no database, ~1s
-pnpm test:security      # the security gate, run separately on purpose
-pnpm test:integration   # against real Postgres
-pnpm test:coverage      # all three, with the 100% coverage gate enforced
-pnpm test:large         # real 50 MB payloads; slow, so it is opt-in
+pnpm test:unit          # 301 tests, no database, ~1s
+pnpm test:security      # 55 tests — the security gate, run separately on purpose
+pnpm test:integration   # 65 tests against real Postgres
+pnpm test:coverage      # those three together, with the 100% coverage gate
+pnpm test:large         # 5 tests at real 50 MB sizes; slow, so it is its own job
 pnpm test:mutation      # mutation testing over the pure modules
 pnpm verify             # typecheck + lint + format + test:coverage
 ```
 
-Three suites, one command each, and `verify` is what CI runs.
+**426 tests across four suites.** `pnpm verify` runs the first three — 421 tests
+with the coverage gate — and is what CI runs on every push. `test:large` is a
+parallel CI job rather than part of `verify`, so the fast feedback loop stays at
+about six seconds; `test:mutation` runs weekly and on demand.
 
 **Unit** — colocated `*.spec.ts` next to their source. Pure functions, plus the
 storage/database consistency contract against a real filesystem and a repository
@@ -433,15 +436,15 @@ plus explicit tests for the identified threat surface. It does not claim the
 service is secure — no rate limiting, no authentication (deliberate: the brief
 has no users), and no penetration testing.
 
-### Two kinds of fixture, on purpose
+### Three kinds of fixture, on purpose
 
-**Synthetic frames.** There is no MP3 encoder on the development machine (no ffmpeg, lame or sox), so `test/helpers/synthesize-mp3.ts` emits **valid MPEG-1 Layer III CBR frames** in TypeScript: a 4-byte header (sync, version, layer, bitrate index, sample-rate index, channel mode) followed by a zeroed payload of `floor(144 × bitrate ÷ sampleRate)` bytes, optionally behind a syncsafe ID3v2 tag. This works because no metadata parser decodes audio to read a header — it walks the chain of frame headers — so bitrate, sample rate, channels and duration all come out exactly as constructed, and `music-metadata` reads them with millisecond-accurate duration. Being able to dial any bitrate, sample rate, channel count and length on demand is what makes the scoring and outlier assertions cheap and exact, and the generator is itself unit-tested against known-good byte sequences (`FF FB 90 00` for 128 kbps/44.1 kHz/stereo, frame size 417).
+**Synthetic MPEG-1 frames.** There is no MP3 encoder on the development machine (no ffmpeg, lame or sox), so `test/helpers/synthesize-mp3.ts` emits **valid Layer III CBR frames** in TypeScript: a 4-byte header (sync, version, layer, bitrate index, sample-rate index, channel mode) followed by a zeroed payload of `floor(144 × bitrate ÷ sampleRate)` bytes, optionally behind a syncsafe ID3v2 tag. This works because no metadata parser decodes audio to read a header — it walks the chain of frame headers — so bitrate, sample rate, channels and duration all come out exactly as constructed, and `music-metadata` reads them with millisecond-accurate duration. Being able to dial any bitrate, sample rate, channel count and length on demand is what makes the scoring and outlier assertions cheap and exact, and the generator is itself unit-tested against known-good byte sequences (`FF FB 90 00` for 128 kbps/44.1 kHz/stereo, frame size 417).
+
+**Synthetic MPEG-2 and MPEG-2.5 frames.** The same generator takes an MPEG version, which is how the low sample rates are reached — 22.05, 16, 11.025 and 8 kHz files go through the real pipeline, and with them the two lowest sample-rate scoring tiers, which had previously only ever been fed numbers directly. It is worth its own paragraph because the version field changes three things at once: the sample-rate table, the bitrate table, and whether a frame codes 1152 samples or 576. Get one right and the other two wrong and the file still parses, with a plausible but wrong duration. Header byte 1 is `0xFB`, `0xF3` and `0xE3` for MPEG-1, 2 and 2.5, and the frame-size coefficient drops from 144 to 72 below MPEG-1. All of that is asserted byte-for-byte, because a bug in the generator would quietly invalidate everything built on it.
 
 **One real file.** Synthetic frames can only ever test the assumptions that built them, so `test/fixtures/david-graeber-voice-cc0.mp3` is a genuine LAME 3.99r encode — 18.5 s of speech, 48 kHz mono, VBR, with a real ID3v2.3 tag — from Wikimedia Commons under **CC0**, which is what makes it redistributable inside this repository with no obligations attached. Full provenance, SHA-256 and refresh instructions are in `test/fixtures/README.md`, and the suite asserts that hash so a swapped or corrupted fixture fails loudly instead of quietly changing what every other assertion means.
 
 It earned its place immediately. A real VBR file reports a **fractional** average bitrate — 96227.979… bps — where every synthetic CBR fixture reports a clean integer. `bitrate_bps` is an integer column, so the service had been relying on the database driver to truncate that silently. It now rounds explicitly, with a test that says so. The same file is also the only thing covering the `V2`-style LAME preset branch of the CBR/VBR detection, since `music-metadata` reports the preset name rather than the literal string `VBR`.
-
-MPEG-2 and MPEG-2.5 are covered too, which is how the low sample rates are reached: the generator takes an MPEG version, and 22.05 / 16 / 11.025 / 8 kHz files go through the real pipeline. That mattered because the version field changes three things at once — the rate table, the bitrate table, and 576 vs 1152 samples per frame — so getting one right and the others wrong yields a file that parses with a plausible but wrong duration.
 
 Still not covered: ID3 embedded cover art, and a Xing header on a stripped file (the tier-three duration fallback is exercised only by unit tests). A broader corpus of real encodes is on the list below.
 
