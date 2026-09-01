@@ -8,8 +8,9 @@
  * header, so a synthetic file exercises the real sniff, hash, parse, score and
  * store path end to end.
  *
- * What it does not exercise: real encoder output, the VBR/Xing path, ID3 cover
- * art. That limitation is stated in the README rather than papered over.
+ * What it does not exercise: real encoder output, VBR, or a tag written by a
+ * real tagger. That gap is covered by test/fixtures/david-graeber-voice-cc0.mp3,
+ * a genuine CC0-licensed LAME encode — see the README in that directory.
  *
  * MPEG-1 Layer III frame header, 4 bytes, big-endian:
  *

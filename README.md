@@ -275,8 +275,8 @@ It is a transparent point table rather than a tuned formula on purpose: every nu
 ## Testing
 
 ```bash
-pnpm test:unit          # 94 tests, no database, ~200 ms
-pnpm test:integration   # 30 tests against real Postgres (needs `pnpm infra:up`;
+pnpm test:unit          # 101 tests, no database, ~300 ms
+pnpm test:integration   # 35 tests against real Postgres (needs `pnpm infra:up`;
                         # migrates the test database itself first)
 pnpm verify             # typecheck + lint + format + both suites
 ```
@@ -285,13 +285,15 @@ Unit tests are colocated `*.spec.ts` next to their source and cover the scoring 
 
 Integration tests run a **real Fastify app against real Postgres and a real filesystem** through `app.inject()` — nothing is mocked, because a mocked unique constraint would prove nothing about concurrency. They cover the full upload flow, both outlier tails, every rejection path (asserting nothing was written to disk _or_ the database), keyset pagination, byte-exact round-trip through the download endpoint, `FILE_GONE`, and the five-way concurrent duplicate race.
 
-### The synthetic MP3 fixture — a limitation worth stating
+### Two kinds of fixture, on purpose
 
-There is no MP3 encoder on the development machine (no ffmpeg, lame or sox), and committing a binary blob of unclear provenance to a take-home repository is worse than generating one. So `test/helpers/synthesize-mp3.ts` emits **valid MPEG-1 Layer III CBR frames** in TypeScript: a 4-byte header (sync, version, layer, bitrate index, sample-rate index, channel mode) followed by a zeroed payload of `floor(144 × bitrate ÷ sampleRate)` bytes, optionally behind a syncsafe ID3v2 tag.
+**Synthetic frames.** There is no MP3 encoder on the development machine (no ffmpeg, lame or sox), so `test/helpers/synthesize-mp3.ts` emits **valid MPEG-1 Layer III CBR frames** in TypeScript: a 4-byte header (sync, version, layer, bitrate index, sample-rate index, channel mode) followed by a zeroed payload of `floor(144 × bitrate ÷ sampleRate)` bytes, optionally behind a syncsafe ID3v2 tag. This works because no metadata parser decodes audio to read a header — it walks the chain of frame headers — so bitrate, sample rate, channels and duration all come out exactly as constructed, and `music-metadata` reads them with millisecond-accurate duration. Being able to dial any bitrate, sample rate, channel count and length on demand is what makes the scoring and outlier assertions cheap and exact, and the generator is itself unit-tested against known-good byte sequences (`FF FB 90 00` for 128 kbps/44.1 kHz/stereo, frame size 417).
 
-This works because no metadata parser decodes audio to read a header — it walks the chain of frame headers — so bitrate, sample rate, channels and duration all come out exactly as constructed. `music-metadata` reads these files with duration accurate to the millisecond.
+**One real file.** Synthetic frames can only ever test the assumptions that built them, so `test/fixtures/david-graeber-voice-cc0.mp3` is a genuine LAME 3.99r encode — 18.5 s of speech, 48 kHz mono, VBR, with a real ID3v2.3 tag — from Wikimedia Commons under **CC0**, which is what makes it redistributable inside this repository with no obligations attached. Full provenance, SHA-256 and refresh instructions are in `test/fixtures/README.md`, and the suite asserts that hash so a swapped or corrupted fixture fails loudly instead of quietly changing what every other assertion means.
 
-What it does **not** cover: real encoder output, the VBR/Xing path, and ID3 cover art. The mitigation is that the generator is itself unit-tested against known-good byte sequences (`FF FB 90 00` for 128 kbps/44.1 kHz/stereo, frame size 417), so a bug in the fixture cannot quietly invalidate the assertions built on it. Adding a real CC0 MP3 to the fixtures is first on the list below.
+It earned its place immediately. A real VBR file reports a **fractional** average bitrate — 96227.979… bps — where every synthetic CBR fixture reports a clean integer. `bitrate_bps` is an integer column, so the service had been relying on the database driver to truncate that silently. It now rounds explicitly, with a test that says so. The same file is also the only thing covering the `V2`-style LAME preset branch of the CBR/VBR detection, since `music-metadata` reports the preset name rather than the literal string `VBR`.
+
+Still not covered: ID3 embedded cover art, MPEG-2/2.5 sample rates, and a Xing header on a stripped file (the tier-three duration fallback is exercised only by unit tests). A broader corpus in CI is on the list below.
 
 ---
 
@@ -299,7 +301,7 @@ What it does **not** cover: real encoder output, the VBR/Xing path, and ID3 cove
 
 Roughly in order of value:
 
-1. **A real MP3 corpus in CI** — fetch a CC0 file, cache it, and keep the synthetic generator for edge cases. This is the biggest gap in the current test suite.
+1. **A broader real-file corpus in CI** — the one committed CC0 file covers VBR, a real encoder and a real ID3 tag, but not cover art, MPEG-2/2.5 rates, or a stripped Xing header. A small cached set of CC0 files across those axes is the remaining test gap.
 2. **Async analysis behind a queue** — `POST` returns `202` with a `PENDING → READY` status. Matters as soon as parsing gets slower or files get bigger; today the analysis is fast enough that the synchronous path is the simpler correct answer.
 3. **Object storage** behind the existing `FileStore` interface, which is the change that unblocks running more than one API instance.
 4. **`storage:gc`** — reconcile the store against `SELECT content_hash` and delete orphans, closing the one failure mode this design deliberately accepts.

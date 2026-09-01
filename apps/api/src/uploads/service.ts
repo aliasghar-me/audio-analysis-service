@@ -126,7 +126,12 @@ export class UploadsService {
           isOutlier,
           qualityScore: quality.score,
           qualityBreakdown: quality.breakdown,
-          bitrateBps: facts.bitrateBps,
+          // A real VBR file reports a fractional average bitrate (a LAME V2
+          // encode measures 96227.979… bps). The column is an integer, and
+          // relying on the driver to truncate it silently is not a decision
+          // this code should be delegating. Sub-bit-per-second precision is
+          // meaningless anyway; the score uses the unrounded value.
+          bitrateBps: facts.bitrateBps === null ? null : Math.round(facts.bitrateBps),
           sampleRateHz: facts.sampleRateHz,
           channels: facts.channels,
           codec: facts.codec,

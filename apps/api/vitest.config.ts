@@ -10,7 +10,7 @@ export default defineConfig({
   test: {
     name: 'unit',
     environment: 'node',
-    include: ['src/**/*.spec.ts', 'test/helpers/**/*.spec.ts'],
+    include: ['src/**/*.spec.ts', 'test/helpers/**/*.spec.ts', 'test/fixtures/**/*.spec.ts'],
     exclude: ['**/node_modules/**', '**/dist/**'],
   },
 });

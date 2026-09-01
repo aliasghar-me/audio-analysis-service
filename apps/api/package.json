@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "//files": "What `pnpm deploy --prod` copies into the runtime image. Without this it copies the whole package — specs, vitest configs and the 218 KB test fixture included.",
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "build": "prisma generate && tsc -p tsconfig.build.json",
