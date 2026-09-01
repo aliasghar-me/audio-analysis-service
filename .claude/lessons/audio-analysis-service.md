@@ -130,3 +130,22 @@ Two real defects behind 100% branch coverage here:
 Read survivors individually before chasing them: most of the remainder here are
 equivalent mutants (removing the comma guard in `range.ts` still returns `none`,
 because the anchored pattern rejects the header anyway).
+
+## `pnpm deploy --prod` is broken here, and `|| true` hid it
+
+`pnpm deploy` disables the lockfile, re-resolves from scratch, and fails with
+`ERR_PNPM_CATALOG_ENTRY_NOT_FOUND_FOR_SPEC` for a catalog this repo does not
+define. Not caused by `pnpm.overrides` and not by the missing web manifest —
+both were tested and ruled out.
+
+Worse, the RUN chain ended in `|| true`, so the failure produced a **successful
+build** of an image containing no node_modules. It crash-looped on the first
+require, and `docker compose build` reported success throughout. Never end a
+build step with `|| true`.
+
+The replacement is `pnpm install --frozen-lockfile --prod --filter @audio/api...`
+and a plain `cp -r node_modules`, which works because `.npmrc` sets
+`node-linker=hoisted` so node_modules is a real tree rather than symlinks.
+
+**A green test suite does not mean the image runs.** Only `docker compose up`
+plus a request against the container catches this class.

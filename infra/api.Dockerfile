@@ -28,12 +28,24 @@ COPY apps/api ./apps/api
 RUN pnpm --filter @audio/api exec prisma generate \
   && pnpm --filter @audio/api exec tsc -p tsconfig.build.json
 
-# Flatten the workspace symlinks into a self-contained directory, then bring the
-# build output across — `deploy` copies the package's files, and dist is one of
-# them only because it was built in place above.
-RUN pnpm --filter @audio/api deploy --prod /deploy \
+# Assemble a self-contained runtime directory.
+#
+# `pnpm deploy --prod` is the obvious tool and it does not work here: it
+# disables the lockfile, re-resolves from scratch, and fails with a spurious
+# ERR_PNPM_CATALOG_ENTRY_NOT_FOUND_FOR_SPEC for a catalog this repo does not
+# define. A prod install against the frozen lockfile is both deterministic and
+# one less moving part — and because .npmrc sets node-linker=hoisted, the
+# resulting node_modules is a plain tree that can simply be copied.
+#
+# Note the deliberate absence of `|| true` on this chain: an earlier version
+# ended with it, so when the deploy step failed the build still succeeded and
+# shipped an image with no node_modules at all. It crash-looped on the first
+# require. A build step that cannot fail is not a build step.
+RUN pnpm install --frozen-lockfile --prod --filter @audio/api... \
+  && mkdir -p /deploy \
+  && cp -r node_modules /deploy/node_modules \
   && cp -r apps/api/dist /deploy/dist \
-  && cp -r apps/api/src/generated /deploy/src/generated 2>/dev/null || true
+  && cp apps/api/package.json /deploy/package.json
 
 # ---------------------------------------------------------------------------
 # Migration runner
