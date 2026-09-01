@@ -1,0 +1,81 @@
+// audio-analysis-service — schema.
+//
+// One table. The service has exactly one write path, and a second table would
+// be structure for its own sake — see the README's "what isn't here" section.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// One row per distinct byte sequence ever uploaded.
+///
+/// The content hash — not the id, and emphatically not the filename — is the
+/// identity of an upload. Everything about duplicate detection follows from
+/// that one decision.
+model Upload {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  /// Lowercase hex SHA-256 of the file bytes. Fixed width, so Char(64) rather
+  /// than Text: a smaller index, and the length doubles as a check digit.
+  ///
+  /// The @unique is not an optimisation. The lookup in the upload pipeline is
+  /// a fast path that two concurrent requests can both miss; this constraint is
+  /// what makes a duplicate row impossible rather than merely unlikely.
+  contentHash String @unique @db.Char(64)
+
+  /// As submitted, reduced to a basename. Display only — never used to build a
+  /// path, and never consulted when deciding whether a file is a duplicate.
+  originalName String @db.VarChar(255)
+
+  /// The client-declared Content-Type. Recorded for audit; never trusted.
+  declaredMime String @db.VarChar(127)
+
+  sizeBytes Int
+
+  /// Relative to STORAGE_DIR and derived entirely from contentHash. Never
+  /// returned by the API — the presenter drops it.
+  storagePath String @db.VarChar(255)
+
+  // ── Analysis, computed once at first ingest and then frozen ───────────────
+  //
+  // A duplicate returns these stored values rather than re-deriving them, so
+  // the same bytes always produce the same answer even if the scoring table
+  // changes later.
+
+  /// Integer milliseconds, not Float seconds or Decimal: exact, sortable, and
+  /// it survives JSON without a custom serializer.
+  durationMs Int
+
+  isOutlier    Boolean
+  qualityScore Int     @db.SmallInt
+
+  /// Per-component points, so a score stays explainable years after the fact.
+  qualityBreakdown Json
+
+  bitrateBps   Int?
+  sampleRateHz Int?
+  channels     Int?    @db.SmallInt
+  codec        String? @db.VarChar(64)
+  /// 'CBR' | 'VBR' | null when the parser could not tell.
+  encodingMode String? @db.VarChar(8)
+
+  /// How many times these exact bytes were submitted again after the first.
+  duplicateCount Int @default(0)
+
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+  lastUploadedAt DateTime @default(now()) @db.Timestamptz(3)
+
+  /// Exactly the ORDER BY of GET /api/uploads. `id` is the tiebreaker, which is
+  /// what makes the keyset cursor a total order.
+  ///
+  /// Deliberately absent: indexes on isOutlier (two distinct values — Postgres
+  /// would ignore it), qualityScore, and originalName (never queried, because
+  /// dedupe is by hash by design).
+  @@index([createdAt(sort: Desc), id(sort: Desc)])
+  @@map("uploads")
+}

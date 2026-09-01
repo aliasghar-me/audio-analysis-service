@@ -1,0 +1,6 @@
+apps/api/src/generated
+apps/api/prisma/migrations
+pnpm-lock.yaml
+.next
+dist
+coverage

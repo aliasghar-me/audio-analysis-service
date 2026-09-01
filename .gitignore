@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.next/
+coverage/
+*.tsbuildinfo
+
+# Local env. .env.example is the committed reference.
+.env
+.env.local
+
+# Uploaded audio. Content-addressed and reproducible; never committed.
+storage/
+
+# Prisma 7 generates a TypeScript client into the source tree.
+apps/api/src/generated/
+
+.DS_Store

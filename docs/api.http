@@ -1,0 +1,98 @@
+# Audio Analysis Service — every endpoint and every error, ready to run.
+#
+# Works with the VS Code REST Client extension and JetBrains HTTP Client.
+# Requires the stack to be running (`docker compose up`, or `pnpm dev`).
+#
+# The sample files referenced below do not exist in the repo; create them with:
+#
+#   printf 'this is definitely not audio' > /tmp/fake.mp3
+#   : > /tmp/empty.mp3
+#   # and any real .mp3 at /tmp/song.mp3
+
+@api = http://localhost:4490
+@uploadId = replace-me-with-an-id-from-the-first-response
+
+### Health — the compose healthcheck target
+GET {{api}}/health
+
+### Upload an MP3 — 201 the first time
+POST {{api}}/api/upload
+Content-Type: multipart/form-data; boundary=----boundary
+
+------boundary
+Content-Disposition: form-data; name="file"; filename="song.mp3"
+Content-Type: audio/mpeg
+
+< /tmp/song.mp3
+------boundary--
+
+### Upload the SAME bytes under a different name — 200, duplicate: true
+# This is the whole feature: `upload.filename` is the name on record,
+# `submittedFilename` is what this request called it, and `originalUploadId`
+# points at the original. Nothing is stored a second time.
+POST {{api}}/api/upload
+Content-Type: multipart/form-data; boundary=----boundary
+
+------boundary
+Content-Disposition: form-data; name="file"; filename="Copy of SONG (2).MP3"
+Content-Type: application/octet-stream
+
+< /tmp/song.mp3
+------boundary--
+
+### A text file wearing an .mp3 name — 400 INVALID_AUDIO (reason: magic_bytes)
+POST {{api}}/api/upload
+Content-Type: multipart/form-data; boundary=----boundary
+
+------boundary
+Content-Disposition: form-data; name="file"; filename="song.mp3"
+Content-Type: audio/mpeg
+
+< /tmp/fake.mp3
+------boundary--
+
+### An empty file — 400 EMPTY_FILE
+POST {{api}}/api/upload
+Content-Type: multipart/form-data; boundary=----boundary
+
+------boundary
+Content-Disposition: form-data; name="file"; filename="song.mp3"
+Content-Type: audio/mpeg
+
+< /tmp/empty.mp3
+------boundary--
+
+### The file under the wrong field name — 400 NO_FILE, naming the field expected
+POST {{api}}/api/upload
+Content-Type: multipart/form-data; boundary=----boundary
+
+------boundary
+Content-Disposition: form-data; name="audio"; filename="song.mp3"
+Content-Type: audio/mpeg
+
+< /tmp/song.mp3
+------boundary--
+
+### Not multipart at all — 415 UNSUPPORTED_MEDIA_TYPE
+POST {{api}}/api/upload
+Content-Type: application/json
+
+{ "file": "nice try" }
+
+### List uploads, newest first
+GET {{api}}/api/uploads?limit=10
+
+### One upload
+GET {{api}}/api/uploads/{{uploadId}}
+
+### The stored bytes — ETag is the content hash
+GET {{api}}/api/uploads/{{uploadId}}/file
+
+### Unknown id — 404 UPLOAD_NOT_FOUND
+GET {{api}}/api/uploads/0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee
+
+### Malformed id — 400 VALIDATION_ERROR
+GET {{api}}/api/uploads/not-a-uuid
+
+### Limit out of range — 400 VALIDATION_ERROR
+GET {{api}}/api/uploads?limit=500

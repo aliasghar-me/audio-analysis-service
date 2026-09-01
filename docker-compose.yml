@@ -1,0 +1,132 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# audio-analysis-service — local stack
+#
+#   docker compose up              everything: db, api, web
+#   docker compose up -d postgres postgres-test    just the databases (pnpm infra:up)
+#
+# Host ports use the x495 block. Every other project on this machine owns its
+# own block (fixit x480, hourmark x442, roomFinder x450), so they can all run
+# at once without conflicting.
+# ─────────────────────────────────────────────────────────────────────────────
+name: audio-analysis
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: audio-analysis-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: audio
+      POSTGRES_PASSWORD: audio
+      POSTGRES_DB: audio_analysis
+    ports:
+      - '5495:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U audio -d audio_analysis']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # The integration suite truncates tables between cases, so its database runs
+  # on tmpfs and is never persisted. Losing it is the point.
+  postgres-test:
+    image: postgres:17-alpine
+    container_name: audio-analysis-postgres-test
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: audio
+      POSTGRES_PASSWORD: audio
+      POSTGRES_DB: audio_analysis_test
+    ports:
+      - '5496:5432'
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U audio -d audio_analysis_test']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Runs once per `up`, applies migrations, exits. The api waits for it to
+  # succeed, so a fresh volume comes up with a schema rather than a 500.
+  migrate:
+    build:
+      context: .
+      dockerfile: infra/api.Dockerfile
+      target: migrate
+    container_name: audio-analysis-migrate
+    restart: 'no'
+    environment:
+      DATABASE_URL: postgresql://audio:audio@postgres:5432/audio_analysis?schema=public
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/api.Dockerfile
+      target: runtime
+    container_name: audio-analysis-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://audio:audio@postgres:5432/audio_analysis?schema=public
+      API_HOST: 0.0.0.0
+      API_PORT: 4490
+      STORAGE_DIR: /data/storage
+      LOG_LEVEL: info
+    ports:
+      - '4490:4490'
+    volumes:
+      - audio-storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4490/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/web.Dockerfile
+      target: runtime
+      args:
+        # A build arg, not an environment variable: Next bakes rewrite
+        # destinations into the build output, so setting this at run time has
+        # no effect. Changing the API address means rebuilding the image.
+        API_URL: http://api:4490
+    container_name: audio-analysis-web
+    restart: unless-stopped
+    environment:
+      PORT: 3490
+    ports:
+      - '3490:3490'
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3490/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  postgres-data:
+  audio-storage:

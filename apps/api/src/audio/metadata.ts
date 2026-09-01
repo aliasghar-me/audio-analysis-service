@@ -1,0 +1,123 @@
+import { parseBuffer, parseFile, type IAudioMetadata } from 'music-metadata';
+import { AppError } from '../http/errors.js';
+
+/**
+ * The facts the rest of the pipeline needs, extracted from MPEG frame headers.
+ *
+ * Everything here comes from the file's own headers rather than from decoding
+ * audio, which is why no ffmpeg or native dependency is required.
+ */
+export interface AudioFacts {
+  durationMs: number;
+  bitrateBps: number | null;
+  sampleRateHz: number | null;
+  channels: number | null;
+  codec: string;
+  encodingMode: 'CBR' | 'VBR' | null;
+}
+
+function invalidAudio(reason: string, cause?: unknown): AppError {
+  return new AppError(
+    'INVALID_AUDIO',
+    'The uploaded file is not a valid MP3 audio file.',
+    { reason },
+    cause === undefined ? undefined : { cause },
+  );
+}
+
+/**
+ * music-metadata reports a profile like `CBR`, `VBR` or a LAME preset (`V2`).
+ * Anything it cannot determine stays null rather than being guessed at.
+ */
+function toEncodingMode(profile: string | undefined): 'CBR' | 'VBR' | null {
+  if (!profile) return null;
+  if (profile === 'CBR') return 'CBR';
+  if (profile.includes('VBR') || /^V\d/.test(profile)) return 'VBR';
+  return null;
+}
+
+/**
+ * Resolve a duration, in milliseconds.
+ *
+ * Three tiers, because a real-world MP3 with a stripped Xing header reaches
+ * tier three and there is no reason to fail on a file every player can play:
+ *
+ *   1. the parser's own duration
+ *   2. sample count over sample rate
+ *   3. a CBR estimate from the payload size and the declared bitrate
+ */
+function resolveDurationMs(metadata: IAudioMetadata, sizeBytes: number): number | null {
+  const { duration, numberOfSamples, sampleRate, bitrate } = metadata.format;
+
+  if (typeof duration === 'number' && Number.isFinite(duration) && duration > 0) {
+    return duration * 1000;
+  }
+
+  if (numberOfSamples && sampleRate) {
+    return (numberOfSamples / sampleRate) * 1000;
+  }
+
+  if (bitrate && bitrate > 0 && sizeBytes > 0) {
+    return ((sizeBytes * 8) / bitrate) * 1000;
+  }
+
+  return null;
+}
+
+/**
+ * Turn a parse result into `AudioFacts`, or into one documented 400.
+ *
+ * Note that a malformed file does not necessarily throw — music-metadata
+ * returns an empty format for unrecognised bytes — so the container check below
+ * is doing real work, not defensive padding. It is also what stops a FLAC or
+ * WAV renamed `.mp3` from being accepted.
+ */
+function toFacts(metadata: IAudioMetadata, sizeBytes: number): AudioFacts {
+  const { container, codec } = metadata.format;
+
+  if (container !== 'MPEG') {
+    throw invalidAudio('not_mpeg');
+  }
+  if (!codec || !/Layer 3/i.test(codec)) {
+    // MPEG Layer I and Layer II are valid MPEG audio but they are not MP3.
+    throw invalidAudio('not_layer_3');
+  }
+
+  const durationMs = resolveDurationMs(metadata, sizeBytes);
+  if (durationMs === null || durationMs <= 0) {
+    throw invalidAudio('no_duration');
+  }
+
+  return {
+    durationMs,
+    bitrateBps: metadata.format.bitrate ?? null,
+    sampleRateHz: metadata.format.sampleRate ?? null,
+    channels: metadata.format.numberOfChannels ?? null,
+    codec,
+    encodingMode: toEncodingMode(metadata.format.codecProfile),
+  };
+}
+
+/** Read the audio facts of a file on disk. */
+export async function readAudioFacts(filePath: string, sizeBytes: number): Promise<AudioFacts> {
+  let metadata: IAudioMetadata;
+  try {
+    metadata = await parseFile(filePath, { duration: true });
+  } catch (cause) {
+    // The library's message can contain a filesystem path, so it goes to the
+    // log via `cause` and never into the response.
+    throw invalidAudio('parse_failed', cause);
+  }
+  return toFacts(metadata, sizeBytes);
+}
+
+/** Same, for bytes already in memory. Used by the unit tests. */
+export async function readAudioFactsFromBuffer(buffer: Uint8Array): Promise<AudioFacts> {
+  let metadata: IAudioMetadata;
+  try {
+    metadata = await parseBuffer(buffer, { mimeType: 'audio/mpeg' }, { duration: true });
+  } catch (cause) {
+    throw invalidAudio('parse_failed', cause);
+  }
+  return toFacts(metadata, buffer.byteLength);
+}
