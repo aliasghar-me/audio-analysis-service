@@ -241,6 +241,23 @@ Only single ranges are honoured. Multi-range responses need `multipart/byterange
 
 ---
 
+## Trade-offs
+
+Every row is a deliberate choice with a cost. The reasoning behind each is in **Design decisions** above; this table is the short version, including what was given up.
+
+| Choice                                          | What it buys                                                                        | What it costs                                                                                                                             |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `music-metadata` over `ffprobe`                 | No native dependency; `pnpm install` is the whole setup, and the tests run anywhere | Less authoritative than ffprobe for exotic VBR files with a stripped Xing header — mitigated by a documented three-tier duration fallback |
+| Exact-byte hashing over acoustic fingerprinting | Duplicate detection is exact, cheap, and provably filename-independent              | A re-encode of the same recording is correctly _not_ a duplicate; catching that needs Chromaprint and is a different problem              |
+| Postgres over SQLite                            | A real unique constraint under concurrency, `jsonb`, `timestamptz`, pooling         | A running database is required even for the integration tests; SQLite would have been simpler for a single-process demo                   |
+| Local disk over S3                              | Content-addressed layout, atomic same-filesystem `rename`, dedupe for free          | Does not survive more than one host. The swap is one file, because nothing outside `storage/store.ts` imports `node:fs`                   |
+| Streaming to a temp file over `toBuffer()`      | Bounded memory regardless of concurrency; the commit is an atomic rename            | ~15 lines instead of 4, and a staging directory to keep clean                                                                             |
+| Synchronous analysis over a queue               | One request, one answer, no job state to model or poll                              | A 50 MB upload holds a connection for the length of the parse                                                                             |
+| Fastify over the house NestJS                   | No DI, decorators, modules or SWC test transform for one endpoint                   | Diverges from the other services in this codebase                                                                                         |
+| Analysis frozen at ingest                       | A duplicate returns byte-identical results years later                              | Changing the scoring table does not retroactively rescore old rows; that would need a backfill                                            |
+| Hand-mirrored API types in the web app          | No third workspace, no build step, no shared-package indirection                    | ~30 lines of duplication that would break silently if the response shape changed                                                          |
+| No `DELETE` endpoint                            | No unauthenticated destruction of other people's data                               | Uploads cannot be removed through the API; deleting content-addressed bytes needs reference counting first                                |
+
 ## Assumptions
 
 - **MP3 only**, ≤ 50 MB (`MAX_UPLOAD_BYTES`).
