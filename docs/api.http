@@ -88,6 +88,18 @@ GET {{api}}/api/uploads/{{uploadId}}
 ### The stored bytes — ETag is the content hash
 GET {{api}}/api/uploads/{{uploadId}}/file
 
+### A byte range — 206 Partial Content, which is how a player seeks
+GET {{api}}/api/uploads/{{uploadId}}/file
+Range: bytes=1000-1999
+
+### The last 500 bytes — the suffix form
+GET {{api}}/api/uploads/{{uploadId}}/file
+Range: bytes=-500
+
+### A range past the end — 416, with Content-Range: bytes */<size>
+GET {{api}}/api/uploads/{{uploadId}}/file
+Range: bytes=99999999-
+
 ### Unknown id — 404 UPLOAD_NOT_FOUND
 GET {{api}}/api/uploads/0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee
 

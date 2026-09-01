@@ -103,6 +103,21 @@ export async function listUploads(limit = 10): Promise<UploadList> {
   return unwrap<UploadList>(await fetch(`/api/uploads?limit=${limit}`, { cache: 'no-store' }));
 }
 
+/**
+ * An unambiguous date.
+ *
+ * `toLocaleDateString()` renders 1 September as either 01/09/2026 or 9/1/2026
+ * depending on the viewer's locale, and a reader cannot tell which they are
+ * looking at. A short month name is unambiguous in every locale.
+ */
+export function formatDate(iso: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  }).format(new Date(iso));
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;

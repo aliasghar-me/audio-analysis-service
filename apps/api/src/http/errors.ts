@@ -22,6 +22,8 @@ export const ERROR_STATUS = {
   /** The row exists but its bytes do not. Deliberately not a 404 — the
    *  resource did exist, and the metadata endpoint still proves it. */
   FILE_GONE: 410,
+  /** A Range header that no part of the representation can satisfy. */
+  RANGE_NOT_SATISFIABLE: 416,
   INTERNAL_ERROR: 500,
 } as const;
 

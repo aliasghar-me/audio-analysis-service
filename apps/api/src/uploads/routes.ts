@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { OutlierPolicy } from '../audio/duration.js';
 import { AppError } from '../http/errors.js';
+import { parseRangeHeader } from '../http/range.js';
 import type { FileStore } from '../storage/store.js';
 import { toUploadView } from './presenter.js';
 import type { UploadsRepository } from './repository.js';
@@ -87,10 +88,15 @@ export async function registerUploadRoutes(
   });
 
   /**
-   * The stored bytes.
+   * The stored bytes, with range requests honoured.
    *
    * ETag is the content hash, which is not a trick — for content-addressed
-   * storage the strongest possible validator is free.
+   * storage the strongest possible validator is free, and it never goes stale
+   * because changed bytes are a different resource by definition.
+   *
+   * Range support is what makes the audio element seekable: players scrub by
+   * asking for byte ranges, and without a 206 every drag of the playhead
+   * refetches the entire file.
    */
   app.get('/api/uploads/:id/file', async (request, reply) => {
     const { id } = uploadIdParams.parse(request.params);
@@ -106,11 +112,38 @@ export async function registerUploadRoutes(
       throw new AppError('FILE_GONE', 'The stored audio for this upload is no longer available.');
     }
 
-    return reply
+    reply
+      .header('accept-ranges', 'bytes')
       .header('content-type', 'audio/mpeg')
-      .header('content-length', row.sizeBytes)
       .header('content-disposition', contentDisposition(row.originalName))
-      .header('etag', `"${row.contentHash}"`)
-      .send(store.openRead(row.contentHash));
+      .header('etag', `"${row.contentHash}"`);
+
+    const range = parseRangeHeader(request.headers.range, row.sizeBytes);
+
+    if (range.kind === 'unsatisfiable') {
+      // 416 carries the length so the client can work out what it should have
+      // asked for. Sent directly rather than thrown, because the error handler
+      // has no way to attach a Content-Range.
+      const error = new AppError(
+        'RANGE_NOT_SATISFIABLE',
+        'The requested range cannot be satisfied.',
+        { sizeBytes: row.sizeBytes },
+      );
+      return reply
+        .code(error.statusCode)
+        .header('content-range', `bytes */${row.sizeBytes}`)
+        .header('content-type', 'application/json')
+        .send(error.toEnvelope());
+    }
+
+    if (range.kind === 'satisfiable') {
+      return reply
+        .code(206)
+        .header('content-range', `bytes ${range.start}-${range.end}/${row.sizeBytes}`)
+        .header('content-length', range.end - range.start + 1)
+        .send(store.openRead(row.contentHash, { start: range.start, end: range.end }));
+    }
+
+    return reply.header('content-length', row.sizeBytes).send(store.openRead(row.contentHash));
   });
 }

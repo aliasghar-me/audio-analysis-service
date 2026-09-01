@@ -26,20 +26,20 @@ model Upload {
   /// The @unique is not an optimisation. The lookup in the upload pipeline is
   /// a fast path that two concurrent requests can both miss; this constraint is
   /// what makes a duplicate row impossible rather than merely unlikely.
-  contentHash String @unique @db.Char(64)
+  contentHash String @unique @map("content_hash") @db.Char(64)
 
   /// As submitted, reduced to a basename. Display only — never used to build a
   /// path, and never consulted when deciding whether a file is a duplicate.
-  originalName String @db.VarChar(255)
+  originalName String @map("original_name") @db.VarChar(255)
 
   /// The client-declared Content-Type. Recorded for audit; never trusted.
-  declaredMime String @db.VarChar(127)
+  declaredMime String @map("declared_mime") @db.VarChar(127)
 
-  sizeBytes Int
+  sizeBytes Int @map("size_bytes")
 
   /// Relative to STORAGE_DIR and derived entirely from contentHash. Never
   /// returned by the API — the presenter drops it.
-  storagePath String @db.VarChar(255)
+  storagePath String @map("storage_path") @db.VarChar(255)
 
   // ── Analysis, computed once at first ingest and then frozen ───────────────
   //
@@ -49,26 +49,26 @@ model Upload {
 
   /// Integer milliseconds, not Float seconds or Decimal: exact, sortable, and
   /// it survives JSON without a custom serializer.
-  durationMs Int
+  durationMs Int @map("duration_ms")
 
-  isOutlier    Boolean
-  qualityScore Int     @db.SmallInt
+  isOutlier    Boolean @map("is_outlier")
+  qualityScore Int     @map("quality_score") @db.SmallInt
 
   /// Per-component points, so a score stays explainable years after the fact.
-  qualityBreakdown Json
+  qualityBreakdown Json @map("quality_breakdown")
 
-  bitrateBps   Int?
-  sampleRateHz Int?
+  bitrateBps   Int?    @map("bitrate_bps")
+  sampleRateHz Int?    @map("sample_rate_hz")
   channels     Int?    @db.SmallInt
   codec        String? @db.VarChar(64)
   /// 'CBR' | 'VBR' | null when the parser could not tell.
-  encodingMode String? @db.VarChar(8)
+  encodingMode String? @map("encoding_mode") @db.VarChar(8)
 
   /// How many times these exact bytes were submitted again after the first.
-  duplicateCount Int @default(0)
+  duplicateCount Int @default(0) @map("duplicate_count")
 
-  createdAt      DateTime @default(now()) @db.Timestamptz(3)
-  lastUploadedAt DateTime @default(now()) @db.Timestamptz(3)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  lastUploadedAt DateTime @default(now()) @map("last_uploaded_at") @db.Timestamptz(3)
 
   /// Exactly the ORDER BY of GET /api/uploads. `id` is the tiebreaker, which is
   /// what makes the keyset cursor a total order.

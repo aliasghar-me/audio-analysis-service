@@ -11,6 +11,7 @@ describe('AppError', () => {
     ['VALIDATION_ERROR', 400],
     ['UPLOAD_NOT_FOUND', 404],
     ['FILE_GONE', 410],
+    ['RANGE_NOT_SATISFIABLE', 416],
     ['INTERNAL_ERROR', 500],
   ] as const)('%s maps to %i', (code, status) => {
     expect(ERROR_STATUS[code]).toBe(status);

@@ -110,6 +110,77 @@ describe('reading uploads back', () => {
     expect(createHash('sha256').update(response.rawPayload).digest('hex')).toBe(contentHash);
   });
 
+  it('advertises range support and serves a partial body', async () => {
+    const mp3 = synthesizeMp3({ frames: 1200 });
+    const created = await harness.app.inject(uploadRequest(mp3, { filename: 'seekable.mp3' }));
+    const { id } = created.json().upload;
+
+    const whole = await harness.app.inject({ method: 'GET', url: `/api/uploads/${id}/file` });
+    expect(whole.statusCode).toBe(200);
+    expect(whole.headers['accept-ranges']).toBe('bytes');
+
+    // The request every audio player opens with.
+    const opening = await harness.app.inject({
+      method: 'GET',
+      url: `/api/uploads/${id}/file`,
+      headers: { range: 'bytes=0-' },
+    });
+    expect(opening.statusCode).toBe(206);
+    expect(opening.headers['content-range']).toBe(`bytes 0-${mp3.length - 1}/${mp3.length}`);
+
+    // A seek into the middle: the bytes must line up with that offset.
+    const slice = await harness.app.inject({
+      method: 'GET',
+      url: `/api/uploads/${id}/file`,
+      headers: { range: 'bytes=1000-1999' },
+    });
+    expect(slice.statusCode).toBe(206);
+    expect(slice.headers['content-range']).toBe(`bytes 1000-1999/${mp3.length}`);
+    expect(slice.headers['content-length']).toBe('1000');
+    expect(slice.rawPayload.length).toBe(1000);
+    expect(Buffer.compare(slice.rawPayload, mp3.subarray(1000, 2000))).toBe(0);
+
+    // The suffix form: the LAST 500 bytes.
+    const tail = await harness.app.inject({
+      method: 'GET',
+      url: `/api/uploads/${id}/file`,
+      headers: { range: 'bytes=-500' },
+    });
+    expect(tail.statusCode).toBe(206);
+    expect(Buffer.compare(tail.rawPayload, mp3.subarray(mp3.length - 500))).toBe(0);
+  });
+
+  it('rejects a range past the end of the file with 416 and the real length', async () => {
+    const mp3 = synthesizeMp3({ frames: 100 });
+    const created = await harness.app.inject(uploadRequest(mp3));
+    const { id } = created.json().upload;
+
+    const response = await harness.app.inject({
+      method: 'GET',
+      url: `/api/uploads/${id}/file`,
+      headers: { range: `bytes=${mp3.length + 10}-` },
+    });
+
+    expect(response.statusCode).toBe(416);
+    expect(response.headers['content-range']).toBe(`bytes */${mp3.length}`);
+    expect(response.json().error.code).toBe('RANGE_NOT_SATISFIABLE');
+  });
+
+  it('ignores a range it will not satisfy and serves the whole body', async () => {
+    const mp3 = synthesizeMp3({ frames: 100 });
+    const created = await harness.app.inject(uploadRequest(mp3));
+    const { id } = created.json().upload;
+
+    const response = await harness.app.inject({
+      method: 'GET',
+      url: `/api/uploads/${id}/file`,
+      headers: { range: 'bytes=0-99,200-299' }, // multi-range
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.rawPayload.length).toBe(mp3.length);
+  });
+
   it('reports a missing file as gone, not as missing metadata', async () => {
     const created = await harness.app.inject(uploadRequest(synthesizeMp3({ frames: 1200 })));
     const { id, contentHash } = created.json().upload;

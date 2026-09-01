@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
   formatBytes,
+  formatDate,
   listUploads,
   uploadFile,
   type UploadResult,
@@ -100,9 +101,22 @@ export default function UploadPanel() {
         <>
           {result.duplicate && (
             <div className="banner duplicate">
-              Already uploaded as <strong>{result.upload.filename}</strong> on{' '}
-              {new Date(result.upload.createdAt).toLocaleDateString()}. Nothing was stored a second
-              time — this file has now been submitted {result.upload.duplicateCount + 1} times.
+              {result.submittedFilename === result.upload.filename ? (
+                <>
+                  You already uploaded <strong>{result.upload.filename}</strong>, first seen{' '}
+                  {formatDate(result.upload.createdAt)}.
+                </>
+              ) : (
+                <>
+                  {/* The whole point of the feature, in one sentence: two different
+                      names, one set of bytes, one stored file. */}
+                  You uploaded <strong>{result.submittedFilename}</strong> — these exact bytes are
+                  already on record as <strong>{result.upload.filename}</strong>, first seen{' '}
+                  {formatDate(result.upload.createdAt)}.
+                </>
+              )}{' '}
+              Nothing was stored a second time; this file has now been submitted{' '}
+              {result.upload.duplicateCount + 1} times.
             </div>
           )}
 

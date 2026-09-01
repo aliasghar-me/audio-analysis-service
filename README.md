@@ -144,13 +144,13 @@ Every error uses one envelope:
 
 `code` is a stable enum to branch on; `message` is for humans. A single table in `src/http/errors.ts` maps code → status, so the two cannot drift apart.
 
-| Endpoint                          | Purpose                                                       |
-| --------------------------------- | ------------------------------------------------------------- |
-| `POST /api/upload`                | multipart, field name **`file`**. `201` new, `200` duplicate. |
-| `GET /api/uploads?limit=&cursor=` | newest first, keyset pagination.                              |
-| `GET /api/uploads/:id`            | one upload with its stored analysis.                          |
-| `GET /api/uploads/:id/file`       | the stored bytes; `ETag` is the content hash.                 |
-| `GET /health`                     | `{ status, database }`; 503 when the database is unreachable. |
+| Endpoint                          | Purpose                                                                                  |
+| --------------------------------- | ---------------------------------------------------------------------------------------- |
+| `POST /api/upload`                | multipart, field name **`file`**. `201` new, `200` duplicate.                            |
+| `GET /api/uploads?limit=&cursor=` | newest first, keyset pagination.                                                         |
+| `GET /api/uploads/:id`            | one upload with its stored analysis.                                                     |
+| `GET /api/uploads/:id/file`       | the stored bytes. Honours `Range` (206) so players can seek; `ETag` is the content hash. |
+| `GET /health`                     | `{ status, database }`; 503 when the database is unreachable.                            |
 
 | Code                     | Status | When                                                                                      |
 | ------------------------ | ------ | ----------------------------------------------------------------------------------------- |
@@ -162,6 +162,7 @@ Every error uses one envelope:
 | `VALIDATION_ERROR`       | 400    | bad route param or query string                                                           |
 | `UPLOAD_NOT_FOUND`       | 404    | unknown id                                                                                |
 | `FILE_GONE`              | 410    | the row exists, the bytes do not                                                          |
+| `RANGE_NOT_SATISFIABLE`  | 416    | a `Range` past the end of the file; the reply carries `Content-Range: bytes */<size>`     |
 | `INTERNAL_ERROR`         | 500    | a bug; the real error goes to the log only                                                |
 
 `docs/api.http` has ready-to-run requests for every one of these.
@@ -219,6 +220,12 @@ Content-addressed at `storage/audio/<aa>/<bb>/<sha256>.mp3`, sharded two levels 
 
 The duplicate body is where the requirement is made visible: `upload.filename` is the name on record, `submittedFilename` is what this request called it, and `originalUploadId` points at the original. One response body demonstrates that filenames do not matter.
 
+### Range requests on the audio endpoint
+
+An audio player does not download a file and then seek — it seeks by asking for byte ranges. The file endpoint advertises `Accept-Ranges: bytes` and answers a `Range` with `206` plus a `Content-Range`, which is the difference between scrubbing a track costing 200 KB and costing the whole 50 MB every time the playhead moves. `createReadStream` seeks to the offset rather than reading and discarding, so serving the tail of a file costs the same as serving the head.
+
+Only single ranges are honoured. Multi-range responses need `multipart/byteranges`, no audio player asks for them, and a server is explicitly allowed to ignore a `Range` it does not wish to satisfy and return `200` — so that is what a multi-range or unknown-unit request gets. A range genuinely past the end of the file gets a `416` carrying `Content-Range: bytes */<size>`, so the client can work out what it should have asked for. The parsing is a pure function in `http/range.ts` with the tricky cases pinned by unit tests — notably that `bytes=-500` means the _last_ 500 bytes, which is the classic place to get this wrong.
+
 ### What is deliberately _not_ here
 
 - **No `upload_events` audit table.** No endpoint would read it, it duplicates the structured request log, and it would make every ingest a two-statement transaction. `duplicateCount` and `lastUploadedAt` give the practical signal for two columns.
@@ -275,15 +282,15 @@ It is a transparent point table rather than a tuned formula on purpose: every nu
 ## Testing
 
 ```bash
-pnpm test:unit          # 101 tests, no database, ~300 ms
-pnpm test:integration   # 35 tests against real Postgres (needs `pnpm infra:up`;
+pnpm test:unit          # 121 tests, no database, ~300 ms
+pnpm test:integration   # 38 tests against real Postgres (needs `pnpm infra:up`;
                         # migrates the test database itself first)
 pnpm verify             # typecheck + lint + format + both suites
 ```
 
 Unit tests are colocated `*.spec.ts` next to their source and cover the scoring grid, the duration boundaries, the magic-byte edge cases, the error table, the env schema and the storage path derivation (including that a filename can never influence a path).
 
-Integration tests run a **real Fastify app against real Postgres and a real filesystem** through `app.inject()` — nothing is mocked, because a mocked unique constraint would prove nothing about concurrency. They cover the full upload flow, both outlier tails, every rejection path (asserting nothing was written to disk _or_ the database), keyset pagination, byte-exact round-trip through the download endpoint, `FILE_GONE`, and the five-way concurrent duplicate race.
+Integration tests run a **real Fastify app against real Postgres and a real filesystem** through `app.inject()` — nothing is mocked, because a mocked unique constraint would prove nothing about concurrency. They cover the full upload flow, both outlier tails, every rejection path (asserting nothing was written to disk _or_ the database), keyset pagination, byte-exact round-trip through the download endpoint, range requests (partial bodies, the suffix form, and a 416), `FILE_GONE`, and the five-way concurrent duplicate race.
 
 ### Two kinds of fixture, on purpose
 
