@@ -6,5 +6,5 @@ dist
 **/.next
 coverage
 .git
-storage
+/storage
 .env

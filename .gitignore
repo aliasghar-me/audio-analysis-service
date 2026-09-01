@@ -9,7 +9,12 @@ coverage/
 .env.local
 
 # Uploaded audio. Content-addressed and reproducible; never committed.
-storage/
+#
+# Anchored with a leading slash on purpose. Unanchored, `storage/` matches a
+# directory of that name at ANY depth — which silently excluded the source
+# module apps/api/src/storage/ from the repository, so a fresh clone could not
+# build. Only a clone test catches that; every local check passes regardless.
+/storage/
 
 # Prisma 7 generates a TypeScript client into the source tree.
 apps/api/src/generated/
