@@ -77,7 +77,7 @@ pnpm db:migrate        # apply migrations to the dev database
 pnpm dev               # API on 4490, UI on 3490
 ```
 
-Then `pnpm verify` — typecheck, lint, format check, unit tests, integration tests — is the single "is this repo healthy" command.
+Then `pnpm verify` — typecheck, lint, format check, and all three test suites with the 100% coverage gate — is the single "is this repo healthy" command. It is exactly what `.github/workflows/ci.yml` runs on every push and pull request, against two Postgres service containers, plus a production dependency audit.
 
 Requires Node ≥ 22 (developed on 26.7) and pnpm 9.15.9. **No ffmpeg, no native modules, no system audio libraries.**
 
@@ -304,15 +304,89 @@ It is a transparent point table rather than a tuned formula on purpose: every nu
 ## Testing
 
 ```bash
-pnpm test:unit          # 121 tests, no database, ~300 ms
-pnpm test:integration   # 38 tests against real Postgres (needs `pnpm infra:up`;
-                        # migrates the test database itself first)
-pnpm verify             # typecheck + lint + format + both suites
+pnpm test:unit          # 222 tests, no database, ~1s
+pnpm test:security      # 50 tests — the security gate, run separately on purpose
+pnpm test:integration   # 65 tests against real Postgres
+pnpm test:coverage      # all three, with the 100% coverage gate enforced
+pnpm verify             # typecheck + lint + format + test:coverage
 ```
 
-Unit tests are colocated `*.spec.ts` next to their source and cover the scoring grid, the duration boundaries, the magic-byte edge cases, the error table, the env schema and the storage path derivation (including that a filename can never influence a path).
+Three suites, one command each, and `verify` is what CI runs.
 
-Integration tests run a **real Fastify app against real Postgres and a real filesystem** through `app.inject()` — nothing is mocked, because a mocked unique constraint would prove nothing about concurrency. They cover the full upload flow, both outlier tails, every rejection path (asserting nothing was written to disk _or_ the database), keyset pagination, byte-exact round-trip through the download endpoint, range requests (partial bodies, the suffix form, and a 416), `FILE_GONE`, and the five-way concurrent duplicate race.
+**Unit** — colocated `*.spec.ts` next to their source. Pure functions, plus the
+storage/database consistency contract against a real filesystem and a repository
+that fails on demand. No database, so it runs on a bare checkout.
+
+**Integration** — a real Fastify app against real Postgres and a real filesystem
+through `app.inject()`. Nothing is mocked, because a mocked unique constraint
+would prove nothing about the concurrency behaviour it exists to check.
+
+**Security** — its own suite (`test/security/`) so a regression there is legible
+in the CI job list rather than buried in a combined run. See below.
+
+### Coverage: 100%, enforced
+
+```text
+Statements   100%     Branches   100%
+Functions    100%     Lines      100%
+```
+
+Thresholds live in `apps/api/vitest.config.ts` and fail the build when coverage
+drops — including in CI. Branches are the number that matters: a file sits at
+100% lines while an `else` has never once executed.
+
+Coverage is measured across all three suites **in a single run**, because
+measuring them separately would give three incomplete pictures and no way to
+merge them — the unit suite never touches `routes.ts`, and the integration suite
+never reaches the failure branches that need a stubbed repository.
+
+Two things are excluded, both deliberately and both stated here rather than
+buried in a config:
+
+| Excluded           | Why                                                                                                                                                                                                                                                                                   |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/generated/**` | Written by `prisma generate`. Not ours, not reviewed, rewritten on every schema change.                                                                                                                                                                                               |
+| `src/main.ts`      | The process entry point: loads env, opens the pool, binds a port, installs signal handlers. Covering it in-process would mean calling `listen()` and `process.exit()` inside the test runner. Everything it composes — `buildApp`, `loadEnv`, `createDatabase` — is covered directly. |
+
+Reaching 100% was not a matter of adding assertions until a number moved. It
+found three pieces of code that should not have existed: an `ingest()` method
+nothing called, a `readAudioFactsFromBuffer` in `src/` that only tests used (and
+which carried a `catch` nothing could reach, because `parseBuffer` resolves with
+an empty format for malformed input rather than throwing), and two redundant
+`.catch()` swallows in `FileStore` that made the caller's own error handling
+unreachable. Deleting those was the fix; the coverage was a side effect.
+
+### Security suite
+
+`test/security/` is a separate gate covering the threat surface an endpoint that
+accepts arbitrary files actually has:
+
+| File                        | Covers                                                                                                                                                                                                                                                                                    |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `file-type.spec.ts`         | twelve real containers renamed `.mp3` — WAV, FLAC, Ogg, MP4, AAC ADTS (both sync variants), JPEG, PNG, PDF, ELF, WebM, random binary — all rejected on content                                                                                                                            |
+| `path-traversal.spec.ts`    | posix, deep, Windows, absolute and nested paths reduced to a basename; unicode, emoji and 400-character names; SQL, shell and HTML metacharacters stored literally                                                                                                                        |
+| `storage-isolation.spec.ts` | an upload can never be stored as `.js`, `.php`, `.sh`, `.html`, `.env` or a config file; writes stay in a hash-shaped tree inside the root; a symlink planted at the destination is replaced rather than written through; archives are never unpacked; a filename cannot forge a log line |
+| `error-disclosure.spec.ts`  | no stack traces, filesystem paths, credentials or internal field names in any response                                                                                                                                                                                                    |
+
+Size limits, the duplicate race and the multipart hangs are covered in
+`test/integration/` (`multipart.spec.ts`, `duplicate.spec.ts`, `failures.spec.ts`)
+because they are correctness tests that happen to have security consequences.
+
+There is no shell in this service at all — MP3 headers are parsed in-process
+rather than by spawning `ffprobe` — so the entire command-injection class is
+absent by construction rather than defended against. That is worth more than any
+test of it.
+
+`pnpm audit --prod --audit-level high` runs in CI and is clean. Two HIGH
+advisories arrived transitively through `@prisma/client` (`mysql2`, reachable
+only if you speak MySQL, which this service does not, and `deepmerge-ts`, used
+by the Prisma CLI's config loader). Both are pinned to patched versions via
+`pnpm.overrides` rather than carried with an explanation.
+
+**What this does and does not claim.** 100% executable-code and branch coverage,
+plus explicit tests for the identified threat surface. It does not claim the
+service is secure — no rate limiting, no authentication (deliberate: the brief
+has no users), and no penetration testing.
 
 ### Two kinds of fixture, on purpose
 
@@ -330,7 +404,7 @@ Still not covered: ID3 embedded cover art, MPEG-2/2.5 sample rates, and a Xing h
 
 Roughly in order of value:
 
-1. **A broader real-file corpus in CI** — the one committed CC0 file covers VBR, a real encoder and a real ID3 tag, but not cover art, MPEG-2/2.5 rates, or a stripped Xing header. A small cached set of CC0 files across those axes is the remaining test gap.
+1. **A broader real-file corpus** — the one committed CC0 file covers VBR, a real encoder and a real ID3 tag, but not cover art, MPEG-2/2.5 rates, or a stripped Xing header. A small cached set of CC0 files across those axes is the remaining test gap.
 2. **Async analysis behind a queue** — `POST` returns `202` with a `PENDING → READY` status. Matters as soon as parsing gets slower or files get bigger; today the analysis is fast enough that the synchronous path is the simpler correct answer.
 3. **Object storage** behind the existing `FileStore` interface, which is the change that unblocks running more than one API instance.
 4. **`storage:gc`** — reconcile the store against `SELECT content_hash` and delete orphans, closing the one failure mode this design deliberately accepts.
@@ -339,4 +413,4 @@ Roughly in order of value:
 7. **Acoustic fingerprinting** (Chromaprint) for near-duplicate detection — the same recording re-encoded, which exact hashing correctly misses.
 8. **Real DSP** for perceived quality: clipping detection, spectral rolloff, LUFS.
 9. **OpenAPI generated from the Zod schemas**, and a shared types package so the web client stops hand-mirroring the contract.
-10. **CI** running `pnpm verify` against a service container, and auth with per-user scoping (which is also the precondition for a `DELETE` endpoint).
+10. **Auth with per-user scoping**, which is also the precondition for a `DELETE` endpoint.

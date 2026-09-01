@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      # Two databases, not one. The integration and security suites truncate
+      # between cases, and test/setup.ts refuses to run when TEST_DATABASE_URL
+      # equals DATABASE_URL — a guard against wiping a development database
+      # because of a typo. Pointing both at the same server in CI would trip it
+      # and fail the build on the first run.
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: audio
+          POSTGRES_PASSWORD: audio
+          POSTGRES_DB: audio_analysis
+        ports: ['5495:5432']
+        options: >-
+          --health-cmd "pg_isready -U audio -d audio_analysis"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+
+      postgres-test:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: audio
+          POSTGRES_PASSWORD: audio
+          POSTGRES_DB: audio_analysis_test
+        ports: ['5496:5432']
+        options: >-
+          --health-cmd "pg_isready -U audio -d audio_analysis_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://audio:audio@localhost:5495/audio_analysis?schema=public
+      TEST_DATABASE_URL: postgresql://audio:audio@localhost:5496/audio_analysis_test?schema=public
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # `verify` is typecheck + lint + format:check + the full suite with the
+      # 100% coverage thresholds enforced. It fails the build if coverage drops.
+      - run: pnpm verify
+
+      # Run separately as well so a security regression is legible in the job
+      # list rather than buried in a combined run.
+      - name: Security suite
+        run: pnpm test:security
+
+      - name: Dependency audit (production dependencies)
+        run: pnpm audit --prod --audit-level high
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: apps/api/coverage/

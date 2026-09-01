@@ -134,14 +134,24 @@ export class FileStore {
     return relative;
   }
 
-  /** Best-effort cleanup of a staged file. Never throws. */
+  /**
+   * Remove a staged file. `force` means a missing file is not an error, but a
+   * genuine failure (a permission problem, say) propagates — swallowing it here
+   * as well as in the caller would mean nothing ever reports it.
+   */
   async discard(tempPath: string): Promise<void> {
-    await rm(tempPath, { force: true }).catch(() => undefined);
+    await rm(tempPath, { force: true });
   }
 
-  /** Remove stored bytes. Used only to clean up after a failed insert. */
+  /**
+   * Remove stored bytes. Used only to clean up after a failed insert.
+   *
+   * Propagates like `discard` does: the caller is cleaning up inside a `catch`
+   * and is the only one who knows that losing the original error to a cleanup
+   * failure would be worse than the cleanup failure itself.
+   */
   async remove(hash: string): Promise<void> {
-    await rm(this.absolutePathFor(hash), { force: true }).catch(() => undefined);
+    await rm(this.absolutePathFor(hash), { force: true });
   }
 
   async exists(hash: string): Promise<boolean> {

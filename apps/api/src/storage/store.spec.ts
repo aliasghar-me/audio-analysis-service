@@ -66,6 +66,54 @@ describe('FileStore.stage', () => {
     expect(chunked.head).toEqual(single.head);
   });
 
+  it('stops capturing once the head is full', async () => {
+    // Chunks keep arriving after the 16-byte head is satisfied; the capture
+    // must ignore them rather than growing.
+    const chunks = Array.from({ length: 12 }, (_, i) => Buffer.from(`chunk${i}-`));
+    const staged = await store.stage(Readable.from(chunks));
+    const whole = Buffer.concat(chunks);
+
+    expect(staged.head).toHaveLength(16);
+    expect(Buffer.from(staged.head)).toEqual(whole.subarray(0, 16));
+    expect(staged.bytes).toBe(whole.length);
+    expect(staged.hash).toBe(createHash('sha256').update(whole).digest('hex'));
+  });
+
+  it('reads back only the requested byte range', async () => {
+    const payload = Buffer.from('0123456789abcdefghijklmnopqrstuvwxyz');
+    const staged = await store.stage(Readable.from([payload]));
+    await store.commit(staged.hash, staged.tempPath);
+
+    const slice: Buffer[] = [];
+    for await (const chunk of store.openRead(staged.hash, { start: 10, end: 19 })) {
+      slice.push(chunk as Buffer);
+    }
+    expect(Buffer.concat(slice)).toEqual(payload.subarray(10, 20));
+  });
+
+  it('reports a hash it has never stored as absent', async () => {
+    expect(await store.exists('b'.repeat(64))).toBe(false);
+  });
+
+  it('propagates a real failure to remove stored bytes', async () => {
+    const { mkdir } = await import('node:fs/promises');
+    const hash = 'c'.repeat(64);
+    // A non-empty directory where the file should be: `rm` without `recursive`
+    // refuses, which is exactly the class of failure the caller must hear about.
+    await mkdir(path.join(store.absolutePathFor(hash), 'nested'), { recursive: true });
+    await expect(store.remove(hash)).rejects.toThrow();
+  });
+
+  it('treats removing a hash that was never stored as a no-op', async () => {
+    await expect(store.remove('d'.repeat(64))).resolves.toBeUndefined();
+  });
+
+  it('propagates a real removal failure instead of hiding it', async () => {
+    // `force: true` already makes a missing file a no-op, so anything that does
+    // throw is a genuine problem the caller has to hear about.
+    await expect(store.discard(root)).rejects.toThrow();
+  });
+
   it('captures a short head without padding it', async () => {
     const staged = await store.stage(Readable.from([Buffer.from('abc')]));
     expect(staged.head).toHaveLength(3);

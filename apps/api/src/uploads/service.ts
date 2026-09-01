@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { Readable } from 'node:stream';
 import type { FastifyBaseLogger } from 'fastify';
-import { readAudioFacts } from '../audio/metadata.js';
+import { readAudioFacts, storableBitrate } from '../audio/metadata.js';
 import { isDurationOutlier, type OutlierPolicy } from '../audio/duration.js';
 import { scoreQuality } from '../audio/quality.js';
 import { isMp3 } from '../audio/sniff.js';
@@ -134,7 +134,7 @@ export class UploadsService {
    * clients.
    */
   async finalize(staged: StagedUpload): Promise<IngestOutcome> {
-    const { repository, store, outlierPolicy } = this.deps;
+    const { repository, store, outlierPolicy, logger } = this.deps;
     const { file, submittedFilename, declaredMime } = staged;
 
     try {
@@ -171,12 +171,7 @@ export class UploadsService {
           isOutlier,
           qualityScore: quality.score,
           qualityBreakdown: quality.breakdown,
-          // A real VBR file reports a fractional average bitrate (a LAME V2
-          // encode measures 96227.979… bps). The column is an integer, and
-          // relying on the driver to truncate it silently is not a decision
-          // this code should be delegating. Sub-bit-per-second precision is
-          // meaningless anyway; the score uses the unrounded value.
-          bitrateBps: facts.bitrateBps === null ? null : Math.round(facts.bitrateBps),
+          bitrateBps: storableBitrate(facts.bitrateBps),
           sampleRateHz: facts.sampleRateHz,
           channels: facts.channels,
           codec: facts.codec,
@@ -214,7 +209,16 @@ export class UploadsService {
         // these bytes.
         const claimed = await repository.findByContentHash(file.hash).catch(() => null);
         if (!claimed) {
-          await store.remove(file.hash);
+          // Swallowed deliberately: this runs inside a catch, and losing the
+          // real failure to a secondary cleanup error would hide why the
+          // upload failed at all. The orphan is logged and reclaimed by the
+          // next upload of the same bytes.
+          await store.remove(file.hash).catch((cleanupError: unknown) => {
+            logger.warn(
+              { err: cleanupError, contentHash: file.hash },
+              'failed to remove orphaned upload after a failed insert',
+            );
+          });
         }
         throw error;
       }
@@ -223,11 +227,5 @@ export class UploadsService {
       // renamed the file away, so this is a no-op there.
       await this.discard(staged);
     }
-  }
-
-  /** Stage and finalize in one call. Convenience for callers with no need to
-   *  inspect the rest of the multipart body. */
-  async ingest(request: IngestRequest): Promise<IngestOutcome> {
-    return this.finalize(await this.stage(request));
   }
 }

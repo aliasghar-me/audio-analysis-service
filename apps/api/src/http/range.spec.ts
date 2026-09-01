@@ -73,6 +73,8 @@ describe('parseRangeHeader', () => {
     ['a malformed header', 'bytes=abc-def'],
     ['bare "bytes="', 'bytes='],
     ['no equals sign', 'bytes 0-10'],
+    ['a bare dash', 'bytes=-'],
+    ['a number too large to be finite', `bytes=${'9'.repeat(400)}-`],
   ])('ignores %s and serves the whole body', (_label, header) => {
     // Ignoring a Range we do not wish to satisfy and replying 200 is explicitly
     // permitted, and is friendlier than a 416 the client cannot act on.

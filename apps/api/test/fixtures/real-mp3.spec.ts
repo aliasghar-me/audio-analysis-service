@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { parseBuffer } from 'music-metadata';
-import { readAudioFactsFromBuffer } from '../../src/audio/metadata.js';
+import { readAudioFactsFromBuffer } from '../helpers/audio.js';
 import { formatDuration, isDurationOutlier } from '../../src/audio/duration.js';
 import { scoreQuality } from '../../src/audio/quality.js';
 import { isMp3 } from '../../src/audio/sniff.js';

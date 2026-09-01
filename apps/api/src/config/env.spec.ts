@@ -28,6 +28,11 @@ describe('loadEnv', () => {
     expect(() => loadEnv({ ...minimal, LOG_LEVEL: 'chatty' })).toThrow(/LOG_LEVEL/);
   });
 
+  it('labels a root-level problem as (root) rather than an empty string', () => {
+    // Zod reports a non-object input with an empty issue path.
+    expect(() => loadEnv('not an environment' as unknown as NodeJS.ProcessEnv)).toThrow(/\(root\)/);
+  });
+
   it('rejects an outlier window that is inside out', () => {
     expect(() =>
       loadEnv({ ...minimal, OUTLIER_MIN_SECONDS: '600', OUTLIER_MAX_SECONDS: '5' }),

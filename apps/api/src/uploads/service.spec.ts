@@ -201,6 +201,94 @@ describe('UploadsService storage/database consistency', () => {
     expect(left[0]).toMatch(/^audio\//);
   });
 
+  it('defaults the declared type when the client sent none', async () => {
+    const { repo } = stubRepository({});
+    const svc = service(repo);
+
+    const staged = await svc.stage({
+      stream: Readable.from([synthesizeMp3({ frames: 200 })]),
+      filename: 'track.mp3',
+      mimetype: undefined,
+      wasTruncated: () => false,
+    });
+
+    expect(staged.declaredMime).toBe('application/octet-stream');
+    await svc.discard(staged);
+  });
+
+  it('rethrows when the constraint fires but the winning row cannot be found', async () => {
+    // P2002 says a row exists; the re-read says it does not. Rather than
+    // inventing a duplicate response, fall through to the orphan cleanup.
+    const { repo } = stubRepository({
+      onCreate: async () => {
+        throw Object.assign(new Error('Unique constraint failed'), {
+          code: 'P2002',
+          meta: { target: ['contentHash'] },
+        });
+      },
+      onFindAfterFailure: null,
+    });
+    const svc = service(repo);
+
+    await expect(svc.finalize(await stage(svc))).rejects.toThrow(/Unique constraint failed/);
+    expect(await everything()).toEqual([]);
+  });
+
+  it('still reports the original failure when the orphan cleanup also fails', async () => {
+    const warnings: unknown[] = [];
+    const { repo } = stubRepository({
+      onCreate: async () => {
+        throw new Error('the original database failure');
+      },
+      onFindAfterFailure: null,
+    });
+    const svc = new UploadsService({
+      repository: repo,
+      // A store whose remove() fails, as a full disk or a permission change
+      // would. The upload must still fail with the reason it actually failed.
+      store: Object.assign(Object.create(FileStore.prototype) as FileStore, store, {
+        remove: async () => {
+          throw new Error('cleanup exploded');
+        },
+      }) as FileStore,
+      outlierPolicy: { minSeconds: 5, maxSeconds: 600 },
+      maxUploadBytes: 50 * 1024 * 1024,
+      logger: { ...noopLogger, warn: (...args: unknown[]) => warnings.push(args) } as never,
+    });
+
+    await expect(svc.finalize(await stage(svc))).rejects.toThrow(/the original database failure/);
+    expect(warnings).toHaveLength(1);
+  });
+
+  it('cleans up the orphan even when the re-check itself fails', async () => {
+    // P2002 was not the cause, and the "does a row own these bytes now?" query
+    // also fails. Treat that as "nothing claims them" and remove them.
+    let calls = 0;
+    const repo = {
+      async findByContentHash() {
+        calls += 1;
+        if (calls === 1) return null;
+        throw new Error('database still unreachable');
+      },
+      async create() {
+        throw new Error('insert failed');
+      },
+      async registerDuplicate() {
+        throw new Error('unused');
+      },
+      async findById() {
+        return null;
+      },
+      async listPage() {
+        return [];
+      },
+    } as unknown as UploadsRepository;
+    const svc = service(repo);
+
+    await expect(svc.finalize(await stage(svc))).rejects.toThrow(/insert failed/);
+    expect(await everything()).toEqual([]);
+  });
+
   it('leaves no staged file behind on a successful insert', async () => {
     const { repo } = stubRepository({});
     const svc = service(repo);
@@ -224,6 +312,31 @@ describe('UploadsService storage/database consistency', () => {
     // Nothing was committed to the content store: the bytes are already there
     // under the original upload, and the staged copy is discarded.
     expect(await everything()).toEqual([]);
+  });
+
+  it('logs and swallows a failure to clean up a staged file', async () => {
+    // The store now propagates real errors; the service is the single place
+    // that decides they are not worth failing a request over.
+    const warnings: unknown[] = [];
+    const { repo } = stubRepository({});
+    const svc = new UploadsService({
+      repository: repo,
+      store,
+      outlierPolicy: { minSeconds: 5, maxSeconds: 600 },
+      maxUploadBytes: 50 * 1024 * 1024,
+      logger: { ...noopLogger, warn: (...args: unknown[]) => warnings.push(args) } as never,
+    });
+
+    // A directory cannot be removed by a non-recursive unlink.
+    await expect(
+      svc.discard({
+        file: { hash: 'a'.repeat(64), bytes: 1, tempPath: root, head: new Uint8Array(0) },
+        submittedFilename: 'x.mp3',
+        declaredMime: 'audio/mpeg',
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(warnings).toHaveLength(1);
   });
 
   it('discards the staged file when a cheap check rejects the upload', async () => {

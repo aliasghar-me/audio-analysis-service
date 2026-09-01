@@ -36,7 +36,7 @@ const MULTIPART_ERRORS: Record<string, { code: ErrorCode; message: string }> = {
  * is plainly a malformed client request, and would put a 500 in the logs for
  * every curl typed without a header.
  */
-function frameworkStatus(error: unknown): number | null {
+export function frameworkStatus(error: unknown): number | null {
   const status = (error as { statusCode?: unknown }).statusCode;
   if (typeof status !== 'number') return null;
   return status >= 400 && status < 500 ? status : null;

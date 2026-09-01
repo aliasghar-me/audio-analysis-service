@@ -33,6 +33,10 @@ describe('scoreQuality', () => {
     ['192 CBR / 44.1 kHz / stereo', { bitrateBps: 192_000 }, 8],
     ['128 CBR / 44.1 kHz / stereo', { bitrateBps: 128_000 }, 7],
     ['64 CBR / 22.05 kHz / mono', { bitrateBps: 64_000, sampleRateHz: 22_050, channels: 1 }, 4],
+    ['256 CBR / 44.1 kHz / stereo', { bitrateBps: 256_000 }, 9],
+    ['160 CBR / 44.1 kHz / stereo', { bitrateBps: 160_000 }, 8],
+    ['96 CBR / 44.1 kHz / stereo', { bitrateBps: 96_000 }, 7],
+    ['32 CBR / 44.1 kHz / stereo', { bitrateBps: 32_000 }, 6],
   ])('%s scores %i', (_label, overrides, expected) => {
     expect(scoreQuality(input(overrides)).score).toBe(expected);
   });
@@ -66,6 +70,24 @@ describe('scoreQuality', () => {
       sizeBytes: consistentSize(192_000, 180_000) + 300_000,
     });
     expect(scoreQuality(withArt).breakdown.consistency).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['48 kHz', 48_000, 3],
+    ['44.1 kHz', 44_100, 2.5],
+    ['32 kHz', 32_000, 1.5],
+    ['22.05 kHz', 22_050, 1],
+    ['8 kHz', 8_000, 0.5],
+  ])('scores the %s sample-rate tier', (_label, sampleRateHz, expected) => {
+    expect(scoreQuality(input({ sampleRateHz })).breakdown.sampleRate).toBe(expected);
+  });
+
+  it('treats an unknown sample rate as neutral-low', () => {
+    expect(scoreQuality(input({ sampleRateHz: null })).breakdown.sampleRate).toBe(1.5);
+  });
+
+  it('gives no consistency credit when the declared bitrate cannot be checked', () => {
+    expect(scoreQuality(input({ bitrateBps: 0 })).breakdown.consistency).toBe(0.75);
   });
 
   it('returns a neutral score when the parser could tell us nothing', () => {

@@ -14,13 +14,15 @@
     "test": "pnpm --filter @audio/api test",
     "test:unit": "pnpm --filter @audio/api test:unit",
     "test:integration": "pnpm --filter @audio/api test:integration",
+    "test:security": "pnpm --filter @audio/api test:security",
+    "test:coverage": "pnpm --filter @audio/api test:coverage",
     "typecheck": "pnpm --filter \"./apps/*\" typecheck",
     "lint": "eslint . --max-warnings 0",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "clean": "rm -rf apps/*/dist apps/*/.next apps/*/coverage apps/*/*.tsbuildinfo",
-    "verify": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test:unit && pnpm test:integration",
+    "verify": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test:coverage",
     "db:generate": "pnpm --filter @audio/api db:generate",
     "db:migrate": "pnpm --filter @audio/api db:migrate",
     "db:migrate:deploy": "pnpm --filter @audio/api db:migrate:deploy",
@@ -39,5 +41,11 @@
     "prettier": "^3.9.6",
     "typescript": "5.9.3",
     "typescript-eslint": "^8.69.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "mysql2": ">=3.22.0",
+      "deepmerge-ts": ">=8.0.0"
+    }
   }
 }

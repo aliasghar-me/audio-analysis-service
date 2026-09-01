@@ -1,4 +1,4 @@
-import { parseBuffer, parseFile, type IAudioMetadata } from 'music-metadata';
+import { parseFile, type IAudioMetadata } from 'music-metadata';
 import { AppError } from '../http/errors.js';
 
 /**
@@ -28,8 +28,11 @@ function invalidAudio(reason: string, cause?: unknown): AppError {
 /**
  * music-metadata reports a profile like `CBR`, `VBR` or a LAME preset (`V2`).
  * Anything it cannot determine stays null rather than being guessed at.
+ *
+ * Exported for its own tests: forging an MP3 that provokes each profile string
+ * out of the parser would test the parser, not this mapping.
  */
-function toEncodingMode(profile: string | undefined): 'CBR' | 'VBR' | null {
+export function toEncodingMode(profile: string | undefined): 'CBR' | 'VBR' | null {
   if (!profile) return null;
   if (profile === 'CBR') return 'CBR';
   if (profile.includes('VBR') || /^V\d/.test(profile)) return 'VBR';
@@ -46,7 +49,7 @@ function toEncodingMode(profile: string | undefined): 'CBR' | 'VBR' | null {
  *   2. sample count over sample rate
  *   3. a CBR estimate from the payload size and the declared bitrate
  */
-function resolveDurationMs(metadata: IAudioMetadata, sizeBytes: number): number | null {
+export function resolveDurationMs(metadata: IAudioMetadata, sizeBytes: number): number | null {
   const { duration, numberOfSamples, sampleRate, bitrate } = metadata.format;
 
   if (typeof duration === 'number' && Number.isFinite(duration) && duration > 0) {
@@ -72,7 +75,7 @@ function resolveDurationMs(metadata: IAudioMetadata, sizeBytes: number): number 
  * is doing real work, not defensive padding. It is also what stops a FLAC or
  * WAV renamed `.mp3` from being accepted.
  */
-function toFacts(metadata: IAudioMetadata, sizeBytes: number): AudioFacts {
+export function toFacts(metadata: IAudioMetadata, sizeBytes: number): AudioFacts {
   const { container, codec } = metadata.format;
 
   if (container !== 'MPEG') {
@@ -111,13 +114,14 @@ export async function readAudioFacts(filePath: string, sizeBytes: number): Promi
   return toFacts(metadata, sizeBytes);
 }
 
-/** Same, for bytes already in memory. Used by the unit tests. */
-export async function readAudioFactsFromBuffer(buffer: Uint8Array): Promise<AudioFacts> {
-  let metadata: IAudioMetadata;
-  try {
-    metadata = await parseBuffer(buffer, { mimeType: 'audio/mpeg' }, { duration: true });
-  } catch (cause) {
-    throw invalidAudio('parse_failed', cause);
-  }
-  return toFacts(metadata, buffer.byteLength);
+/**
+ * The average bitrate as an integer, for the column that stores it.
+ *
+ * A real VBR file reports a fractional average (a LAME V2 encode measures
+ * 96227.979… bps). Rounding here is an explicit decision rather than something
+ * delegated to whatever the database driver happens to do with a float; the
+ * quality score keeps the unrounded value, where the precision is harmless.
+ */
+export function storableBitrate(bitrateBps: number | null): number | null {
+  return bitrateBps === null ? null : Math.round(bitrateBps);
 }
