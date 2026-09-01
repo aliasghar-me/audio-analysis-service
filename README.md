@@ -9,48 +9,55 @@ curl -F "file=@song.mp3" http://localhost:4490/api/upload
 ```json
 {
   "duplicate": false,
-  "submittedFilename": "song.mp3",
   "originalUploadId": null,
-  "upload": {
-    "id": "01a05da6-03b4-7108-8842-e182d259124f",
-    "filename": "song.mp3",
-    "contentHash": "15605ad261dd8e77f356423163933901ded41ae4f11a3b8f54fa2a29602af18d",
-    "sizeBytes": 7680000,
-    "duplicateCount": 0,
-    "createdAt": "2026-09-01T15:45:56.149Z",
-    "lastUploadedAt": "2026-09-01T15:45:56.149Z"
-  },
+  "upload": { "id": "01a05da6…", "filename": "song.mp3", "contentHash": "15605ad2…", "sizeBytes": 7680000 },
   "analysis": {
-    "duration": {
-      "ms": 192000,
-      "seconds": 192,
-      "formatted": "03:12",
-      "isOutlier": false,
-      "outlierPolicy": { "minSeconds": 5, "maxSeconds": 600 }
-    },
-    "quality": {
-      "score": 10,
-      "max": 10,
-      "basis": "encoding",
-      "breakdown": {
-        "bitrate": 4,
-        "sampleRate": 3,
-        "channels": 1,
-        "encodingMode": 0.75,
-        "consistency": 1,
-        "total": 9.75
-      }
-    },
-    "format": {
-      "codec": "MPEG 1 Layer 3",
-      "bitrateBps": 320000,
-      "sampleRateHz": 48000,
-      "channels": 2,
-      "encodingMode": "CBR"
-    }
+    "duration": { "seconds": 192, "formatted": "03:12", "isOutlier": false,
+                   "outlierPolicy": { "minSeconds": 5, "maxSeconds": 600 } },
+    "quality": { "score": 10, "max": 10, "basis": "encoding", "breakdown": { "bitrate": 4, "sampleRate": 3, … } },
+    "format": { "codec": "MPEG 1 Layer 3", "bitrateBps": 320000, "sampleRateHz": 48000, "channels": 2 }
   }
 }
 ```
+
+---
+
+## Scope
+
+The brief is small and says twice that it values simplicity over
+over-engineering, so it is worth being explicit about what is here and why.
+
+**What the brief asked for**
+
+| Requirement                                    | Where                                                                                |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `POST /api/upload`, multipart, accepts `.mp3`  | `uploads/routes.ts`                                                                  |
+| Store the file                                 | `storage/store.ts` — content-addressed by SHA-256                                    |
+| Return analysis                                | `uploads/presenter.ts`                                                               |
+| Duration + outlier flag                        | `audio/duration.ts`, rule documented under [Assumptions](#the-duration-outlier-rule) |
+| Quality score 1–10 from simple heuristics      | `audio/quality.ts`, table under [Assumptions](#the-quality-score)                    |
+| Exact duplicate detection, filename irrelevant | SHA-256 + `@unique` on `content_hash`                                                |
+| Reference to the original upload               | `originalUploadId` in the response                                                   |
+| A unit test and an integration test            | `audio/*.spec.ts`, `test/integration/duplicate.spec.ts`                              |
+| Production-grade database                      | PostgreSQL, with the constraint doing real work                                      |
+
+A duplicate creates **no second row and no second file** — the original's
+`duplicateCount` is incremented instead. That is the reading of "optimized use
+of storage and databases" the brief asks for.
+
+**Also here, and why**
+
+- **`GET` endpoints** — the UI needs them, and they prove the storage layer is real rather than write-only.
+- **A one-page web UI** — the role is titled Full Stack Developer.
+- **`Range` support on the audio endpoint** — found by driving the UI in a real browser: without it an `<audio>` element cannot seek, and every scrub refetches the whole file.
+- **A security suite** — this endpoint takes arbitrary bytes from anyone, so fake `.mp3`s, path traversal and storage isolation get their own tests.
+- **Coverage and mutation gates** — cheap to run, and between them they found dead code, a presenter that no test actually checked, and boundary assertions that could not fail.
+
+**Deliberately not here**
+
+Auth, rate limiting, queues, Redis, S3, Kubernetes, virus scanning, and any DSP
+or ML audio analysis. Each is argued in [What is deliberately not here](#what-is-deliberately-not-here)
+and [With more time](#with-more-time).
 
 ---
 
@@ -111,6 +118,9 @@ POST /api/upload
 
 ### Layout
 
+<details>
+<summary>Full file layout</summary>
+
 ```
 apps/api/src/
 ├── app.ts                 buildApp(deps) — the seam the integration tests use
@@ -123,6 +133,8 @@ apps/api/src/
 └── uploads/               routes → service → repository, plus the presenter
 apps/web/src/              one page, one client component, one fetch wrapper
 ```
+
+</details>
 
 The layering rule, in one line: **routes do HTTP, the service owns the order of operations, the repository owns every Prisma call, and `audio/` is pure.** That last part is why the unit suite needs no database and runs in under 200 ms.
 
@@ -305,148 +317,26 @@ It is a transparent point table rather than a tuned formula on purpose: every nu
 
 ```bash
 pnpm test:unit          # 301 tests, no database, ~1s
-pnpm test:security      # 55 tests — the security gate, run separately on purpose
+pnpm test:security      # 55 tests — the security gate, kept separate on purpose
 pnpm test:integration   # 65 tests against real Postgres
-pnpm test:coverage      # those three together, with the 100% coverage gate
-pnpm test:large         # 5 tests at real 50 MB sizes; slow, so it is its own job
+pnpm test:coverage      # those three, with the 100% coverage gate
+pnpm test:large         # 5 tests at real 50 MB sizes; its own CI job
 pnpm test:mutation      # mutation testing over the pure modules
 pnpm verify             # typecheck + lint + format + test:coverage
 ```
 
-**426 tests across four suites.** `pnpm verify` runs the first three — 421 tests
-with the coverage gate — and is what CI runs on every push. `test:large` is a
-parallel CI job rather than part of `verify`, so the fast feedback loop stays at
-about six seconds; `test:mutation` runs weekly and on demand.
+**426 tests across four suites**, with statements, branches, functions and lines
+all at **100%** and a mutation score of **92.2%**. `pnpm verify` runs the first
+three suites (421 tests) with the coverage gate and is what CI runs on every
+push; the 50 MB suite is a parallel job and mutation testing runs weekly.
 
-**Unit** — colocated `*.spec.ts` next to their source. Pure functions, plus the
-storage/database consistency contract against a real filesystem and a repository
-that fails on demand. No database, so it runs on a bare checkout.
+Nothing is mocked in the integration suite — a mocked unique constraint would
+prove nothing about the concurrency behaviour it exists to check. There are no
+skipped, `.only` or `.todo` tests.
 
-**Integration** — a real Fastify app against real Postgres and a real filesystem
-through `app.inject()`. Nothing is mocked, because a mocked unique constraint
-would prove nothing about the concurrency behaviour it exists to check.
-
-**Security** — its own suite (`test/security/`) so a regression there is legible
-in the CI job list rather than buried in a combined run. See below.
-
-**Large** — the 50 MB ceiling at its real size. Every other size test runs at a
-reduced `MAX_UPLOAD_BYTES` to keep the fast suite fast, which left the two
-claims this README actually makes untested: that a 50 MB file is accepted, and
-that the service does not hold one in memory. Its own script and its own CI job.
-
-### Coverage: 100%, enforced
-
-```text
-Statements   100%     Branches   100%
-Functions    100%     Lines      100%
-```
-
-Thresholds live in `apps/api/vitest.config.ts` and fail the build when coverage
-drops — including in CI. Branches are the number that matters: a file sits at
-100% lines while an `else` has never once executed.
-
-Coverage is measured across all three suites **in a single run**, because
-measuring them separately would give three incomplete pictures and no way to
-merge them — the unit suite never touches `routes.ts`, and the integration suite
-never reaches the failure branches that need a stubbed repository.
-
-Two things are excluded, both deliberately and both stated here rather than
-buried in a config:
-
-| Excluded           | Why                                                                                                                                                                                                                                                                                   |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/generated/**` | Written by `prisma generate`. Not ours, not reviewed, rewritten on every schema change.                                                                                                                                                                                               |
-| `src/main.ts`      | The process entry point: loads env, opens the pool, binds a port, installs signal handlers. Covering it in-process would mean calling `listen()` and `process.exit()` inside the test runner. Everything it composes — `buildApp`, `loadEnv`, `createDatabase` — is covered directly. |
-
-Reaching 100% was not a matter of adding assertions until a number moved. It
-found three pieces of code that should not have existed: an `ingest()` method
-nothing called, a `readAudioFactsFromBuffer` in `src/` that only tests used (and
-which carried a `catch` nothing could reach, because `parseBuffer` resolves with
-an empty format for malformed input rather than throwing), and two redundant
-`.catch()` swallows in `FileStore` that made the caller's own error handling
-unreachable. Deleting those was the fix; the coverage was a side effect.
-
-### Mutation testing: 92.2%
-
-Coverage says every branch executed. It does not say a test would fail if `>`
-became `>=`, and this service's scoring thresholds and range arithmetic are
-exactly where an off-by-one hides behind a green suite.
-
-`pnpm test:mutation` runs Stryker over the pure modules — `audio/`,
-`http/range.ts`, `http/errors.ts`, `uploads/presenter.ts`. Anything touching
-Postgres or the filesystem is excluded: every mutant re-runs the suite, and
-those mutants mostly prove the database still works.
-
-It started at **82.0%** and found something coverage could not. `presenter.ts`
-scored **15%**: replacing its entire return value with `{}` survived, because it
-had only ever been checked indirectly by integration tests asserting fields on a
-response. Nothing tested the mapping itself — including that it drops
-`storagePath`. It now has its own spec and scores 100%.
-
-The other lesson was about assertion level. Every bitrate-tier mutant survived
-(`>= 320` → `> 320`) because the tests asserted the final 1–10 score, and
-rounding absorbs a 0.5-point shift in one component. The tests now assert the
-`breakdown` component at each boundary, which is where the thresholds live.
-
-|                | start | now       |
-| -------------- | ----- | --------- |
-| overall        | 82.0% | **92.2%** |
-| `presenter.ts` | 15.4% | 100%      |
-| `sniff.ts`     | 71.4% | 95.9%     |
-| `quality.ts`   | 79.8% | 92.1%     |
-| `duration.ts`  | 100%  | 100%      |
-
-The gate breaks below 90%. The ~33 remaining survivors were read individually
-and are predominantly **equivalent mutants** — removing the comma guard in
-`range.ts`, for example, still returns `none`, because the anchored pattern
-rejects a multi-range header anyway. Killing those would mean contorting tests
-around code paths that cannot behave differently, which makes a suite worse.
-Mutation runs weekly and on demand rather than on every push; a slow gate on
-every commit is the over-engineering this project is trying to avoid.
-
-### Security suite
-
-`test/security/` is a separate gate covering the threat surface an endpoint that
-accepts arbitrary files actually has:
-
-| File                        | Covers                                                                                                                                                                                                                                                                                    |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `file-type.spec.ts`         | twelve real containers renamed `.mp3` — WAV, FLAC, Ogg, MP4, AAC ADTS (both sync variants), JPEG, PNG, PDF, ELF, WebM, random binary — all rejected on content                                                                                                                            |
-| `path-traversal.spec.ts`    | posix, deep, Windows, absolute and nested paths reduced to a basename; unicode, emoji and 400-character names; SQL, shell and HTML metacharacters stored literally                                                                                                                        |
-| `storage-isolation.spec.ts` | an upload can never be stored as `.js`, `.php`, `.sh`, `.html`, `.env` or a config file; writes stay in a hash-shaped tree inside the root; a symlink planted at the destination is replaced rather than written through; archives are never unpacked; a filename cannot forge a log line |
-| `error-disclosure.spec.ts`  | no stack traces, filesystem paths, credentials or internal field names in any response                                                                                                                                                                                                    |
-
-Size limits, the duplicate race and the multipart hangs are covered in
-`test/integration/` (`multipart.spec.ts`, `duplicate.spec.ts`, `failures.spec.ts`)
-because they are correctness tests that happen to have security consequences.
-
-There is no shell in this service at all — MP3 headers are parsed in-process
-rather than by spawning `ffprobe` — so the entire command-injection class is
-absent by construction rather than defended against. That is worth more than any
-test of it.
-
-`pnpm audit --prod --audit-level high` runs in CI and is clean. Two HIGH
-advisories arrived transitively through `@prisma/client` (`mysql2`, reachable
-only if you speak MySQL, which this service does not, and `deepmerge-ts`, used
-by the Prisma CLI's config loader). Both are pinned to patched versions via
-`pnpm.overrides` rather than carried with an explanation.
-
-**What this does and does not claim.** 100% executable-code and branch coverage,
-plus explicit tests for the identified threat surface. It does not claim the
-service is secure — no rate limiting, no authentication (deliberate: the brief
-has no users), and no penetration testing.
-
-### Three kinds of fixture, on purpose
-
-**Synthetic MPEG-1 frames.** There is no MP3 encoder on the development machine (no ffmpeg, lame or sox), so `test/helpers/synthesize-mp3.ts` emits **valid Layer III CBR frames** in TypeScript: a 4-byte header (sync, version, layer, bitrate index, sample-rate index, channel mode) followed by a zeroed payload of `floor(144 × bitrate ÷ sampleRate)` bytes, optionally behind a syncsafe ID3v2 tag. This works because no metadata parser decodes audio to read a header — it walks the chain of frame headers — so bitrate, sample rate, channels and duration all come out exactly as constructed, and `music-metadata` reads them with millisecond-accurate duration. Being able to dial any bitrate, sample rate, channel count and length on demand is what makes the scoring and outlier assertions cheap and exact, and the generator is itself unit-tested against known-good byte sequences (`FF FB 90 00` for 128 kbps/44.1 kHz/stereo, frame size 417).
-
-**Synthetic MPEG-2 and MPEG-2.5 frames.** The same generator takes an MPEG version, which is how the low sample rates are reached — 22.05, 16, 11.025 and 8 kHz files go through the real pipeline, and with them the two lowest sample-rate scoring tiers, which had previously only ever been fed numbers directly. It is worth its own paragraph because the version field changes three things at once: the sample-rate table, the bitrate table, and whether a frame codes 1152 samples or 576. Get one right and the other two wrong and the file still parses, with a plausible but wrong duration. Header byte 1 is `0xFB`, `0xF3` and `0xE3` for MPEG-1, 2 and 2.5, and the frame-size coefficient drops from 144 to 72 below MPEG-1. All of that is asserted byte-for-byte, because a bug in the generator would quietly invalidate everything built on it.
-
-**One real file.** Synthetic frames can only ever test the assumptions that built them, so `test/fixtures/david-graeber-voice-cc0.mp3` is a genuine LAME 3.99r encode — 18.5 s of speech, 48 kHz mono, VBR, with a real ID3v2.3 tag — from Wikimedia Commons under **CC0**, which is what makes it redistributable inside this repository with no obligations attached. Full provenance, SHA-256 and refresh instructions are in `test/fixtures/README.md`, and the suite asserts that hash so a swapped or corrupted fixture fails loudly instead of quietly changing what every other assertion means.
-
-It earned its place immediately. A real VBR file reports a **fractional** average bitrate — 96227.979… bps — where every synthetic CBR fixture reports a clean integer. `bitrate_bps` is an integer column, so the service had been relying on the database driver to truncate that silently. It now rounds explicitly, with a test that says so. The same file is also the only thing covering the `V2`-style LAME preset branch of the CBR/VBR detection, since `music-metadata` reports the preset name rather than the literal string `VBR`.
-
-Still not covered: ID3 embedded cover art, and a Xing header on a stripped file (the tier-three duration fallback is exercised only by unit tests). A broader corpus of real encodes is on the list below.
+Detail, and what each layer is actually for: **[docs/TESTING.md](docs/TESTING.md)**
+and **[docs/SECURITY.md](docs/SECURITY.md)**. Runnable requests for every
+endpoint and error: **[docs/api.http](docs/api.http)**.
 
 ---
 
