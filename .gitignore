@@ -10,6 +10,12 @@ reports/
 .env
 .env.local
 
+# Production secrets. This file is written by hand on the server and must never
+# reach the repository; the .example beside it is the committed reference.
+# Both spellings, because it is easy to write it to the repo root by mistake.
+.env.production
+deploy/.env.production
+
 # Uploaded audio. Content-addressed and reproducible; never committed.
 #
 # Anchored with a leading slash on purpose. Unanchored, `storage/` matches a

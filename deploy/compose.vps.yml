@@ -1,0 +1,185 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# audio-analysis-service — production stack. Lives at /opt/audio-analysis on
+# the VPS.
+#
+#   docker compose --env-file .env.production -f deploy/compose.vps.yml up -d --build
+#
+# Differences from the local docker-compose.yml, and why:
+#
+#   1. No `postgres-test`. It exists only to be truncated by the integration
+#      suite; there is nothing to test against in production.
+#
+#   2. No published ports — not one, on any service. The local file publishes
+#      5495/5496/4490/3490 so a developer can reach them. Here, Postgres is
+#      unreachable from the internet *by construction* rather than by a firewall
+#      rule that someone can later relax by accident. The firewall is a second
+#      layer, not the only one.
+#
+#   3. Traefik routes to the containers over the bridge network. This host
+#      already runs Traefik in host-network mode terminating :80 and :443 for
+#      three other applications, so it owns those ports and issues the
+#      certificates. Standing up a second reverse proxy here would fail to bind
+#      and take those applications down with it.
+#
+#   4. `/api` and `/health` are routed straight to the API rather than through
+#      the web container's Next.js proxy. Functionally either works — Next
+#      streams a rewrite — but a 50 MB upload should not make two hops through
+#      Node when one will do.
+#
+# Deliberately NOT configured: Traefik's `buffering` middleware. Its
+# `maxRequestBodyBytes` looks like the right way to reject oversized uploads at
+# the edge, and it is a trap: buffering spools the entire body to disk before
+# forwarding, which defeats the single-pass streaming hash the API is built
+# around. The 50 MiB cap belongs where it already is — in @fastify/multipart,
+# which aborts mid-stream.
+# ─────────────────────────────────────────────────────────────────────────────
+name: audio-analysis
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: '20m'
+    max-file: '3'
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: audio-analysis-postgres
+    restart: unless-stopped
+    logging: *logging
+    security_opt: [no-new-privileges:true]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    labels:
+      traefik.enable: 'false'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Runs once per deploy, applies migrations, exits. The API will not start
+  # until this has exited 0, so a fresh volume comes up with a schema rather
+  # than serving 500s while someone works out why.
+  migrate:
+    build:
+      context: ..
+      dockerfile: infra/api.Dockerfile
+      target: migrate
+    container_name: audio-analysis-migrate
+    restart: 'no'
+    logging: *logging
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+    labels:
+      traefik.enable: 'false'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/api.Dockerfile
+      target: runtime
+    container_name: audio-analysis-api
+    restart: unless-stopped
+    logging: *logging
+    security_opt: [no-new-privileges:true]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      API_HOST: 0.0.0.0
+      API_PORT: 4490
+      STORAGE_DIR: /data/storage
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-52428800}
+      OUTLIER_MIN_SECONDS: ${OUTLIER_MIN_SECONDS:-5}
+      OUTLIER_MAX_SECONDS: ${OUTLIER_MAX_SECONDS:-600}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - audio-storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    labels:
+      traefik.enable: 'true'
+      traefik.docker.network: audio_analysis_web
+      # Higher priority than the catch-all web router below, so /api and
+      # /health reach Fastify directly and never touch Next.
+      traefik.http.routers.audio-api.rule: >-
+        Host(`${PUBLIC_HOST:?PUBLIC_HOST is required}`) &&
+        (PathPrefix(`/api`) || Path(`/health`))
+      traefik.http.routers.audio-api.priority: '20'
+      traefik.http.routers.audio-api.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
+      traefik.http.routers.audio-api.tls: 'true'
+      traefik.http.routers.audio-api.tls.certresolver: ${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      traefik.http.services.audio-api.loadbalancer.server.port: '4490'
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4490/health').then(r=>r.json()).then(j=>process.exit(j.database==='up'?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  web:
+    build:
+      context: ..
+      dockerfile: infra/web.Dockerfile
+      target: runtime
+      args:
+        # A build arg, not a runtime variable: Next bakes rewrite destinations
+        # into the build output. This only covers the fallback path — Traefik
+        # sends /api straight to the API — but it must still be correct, or a
+        # request that does reach Next proxies to nowhere.
+        API_URL: http://api:4490
+    container_name: audio-analysis-web
+    restart: unless-stopped
+    logging: *logging
+    security_opt: [no-new-privileges:true]
+    environment:
+      NODE_ENV: production
+      PORT: 3490
+    depends_on:
+      api:
+        condition: service_healthy
+    labels:
+      traefik.enable: 'true'
+      traefik.docker.network: audio_analysis_web
+      traefik.http.routers.audio-web.rule: Host(`${PUBLIC_HOST:?PUBLIC_HOST is required}`)
+      traefik.http.routers.audio-web.priority: '10'
+      traefik.http.routers.audio-web.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
+      traefik.http.routers.audio-web.tls: 'true'
+      traefik.http.routers.audio-web.tls.certresolver: ${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      traefik.http.services.audio-web.loadbalancer.server.port: '3490'
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3490/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  # Named, and never removed by the deploy script. `docker compose down` without
+  # `-v` leaves both in place, which is what makes the restart test meaningful.
+  postgres-data:
+  audio-storage:
+
+networks:
+  default:
+    # Named explicitly so it does not inherit the directory name — the
+    # traefik.docker.network labels above must match this exactly.
+    name: audio_analysis_web

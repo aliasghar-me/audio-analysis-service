@@ -336,7 +336,9 @@ skipped, `.only` or `.todo` tests.
 
 Detail, and what each layer is actually for: **[docs/TESTING.md](docs/TESTING.md)**
 and **[docs/SECURITY.md](docs/SECURITY.md)**. Runnable requests for every
-endpoint and error: **[docs/api.http](docs/api.http)**.
+endpoint and error: **[docs/api.http](docs/api.http)**. Putting it on a server,
+and why it uses the reverse proxy already running there rather than the Nginx
+the recipe usually calls for: **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
 
 ---
 
