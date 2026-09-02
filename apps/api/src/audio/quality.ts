@@ -18,6 +18,11 @@ export interface QualityInput {
   encodingMode: 'CBR' | 'VBR' | null;
   sizeBytes: number;
   durationMs: number;
+  /**
+   * Whether `durationMs` was derived from `sizeBytes`. Optional, defaulting to
+   * false, so callers holding an authoritative duration need say nothing.
+   */
+  durationIsEstimated?: boolean;
 }
 
 export interface QualityBreakdown {
@@ -99,6 +104,12 @@ function scoreEncodingMode(mode: 'CBR' | 'VBR' | null): number {
  */
 function scoreConsistency(input: QualityInput): number {
   if (input.bitrateBps === null || input.durationMs <= 0) return 0.75;
+
+  // If the duration was itself computed as sizeBytes x 8 / bitrate, then
+  // actual = sizeBytes / (sizeBytes x 8 / bitrate) = bitrate / 8 = expected,
+  // and the ratio is exactly 1.0 for every possible file. The check would score
+  // a truncated fragment as perfectly consistent, so it says nothing instead.
+  if (input.durationIsEstimated === true) return 0.75;
 
   const actualBytesPerSecond = input.sizeBytes / (input.durationMs / 1000);
   const expectedBytesPerSecond = input.bitrateBps / 8;

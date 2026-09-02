@@ -156,6 +156,7 @@ export class UploadsService {
         encodingMode: facts.encodingMode,
         sizeBytes: file.bytes,
         durationMs: facts.durationMs,
+        durationIsEstimated: facts.durationIsEstimated,
       });
 
       const storagePath = await store.commit(file.hash, file.tempPath);

@@ -9,11 +9,23 @@ import { AppError } from '../http/errors.js';
  */
 export interface AudioFacts {
   durationMs: number;
+  /**
+   * True when the duration had to be derived from the file size and the
+   * declared bitrate rather than read from the stream. It matters downstream:
+   * a size-derived duration cannot be used to judge whether the size is
+   * plausible, because that comparison would be circular.
+   */
+  durationIsEstimated: boolean;
   bitrateBps: number | null;
   sampleRateHz: number | null;
   channels: number | null;
   codec: string;
   encodingMode: 'CBR' | 'VBR' | null;
+}
+
+export interface ResolvedDuration {
+  durationMs: number;
+  estimated: boolean;
 }
 
 function invalidAudio(reason: string, cause?: unknown): AppError {
@@ -49,22 +61,53 @@ export function toEncodingMode(profile: string | undefined): 'CBR' | 'VBR' | nul
  *   2. sample count over sample rate
  *   3. a CBR estimate from the payload size and the declared bitrate
  */
-export function resolveDurationMs(metadata: IAudioMetadata, sizeBytes: number): number | null {
+export function resolveDurationMs(
+  metadata: IAudioMetadata,
+  sizeBytes: number,
+): ResolvedDuration | null {
   const { duration, numberOfSamples, sampleRate, bitrate } = metadata.format;
 
   if (typeof duration === 'number' && Number.isFinite(duration) && duration > 0) {
-    return duration * 1000;
+    return { durationMs: duration * 1000, estimated: false };
   }
 
   if (numberOfSamples && sampleRate) {
-    return (numberOfSamples / sampleRate) * 1000;
+    return { durationMs: (numberOfSamples / sampleRate) * 1000, estimated: false };
   }
 
   if (bitrate && bitrate > 0 && sizeBytes > 0) {
-    return ((sizeBytes * 8) / bitrate) * 1000;
+    // Derived from the size, so anything that later compares the size against
+    // this number is comparing a value with itself.
+    return { durationMs: ((sizeBytes * 8) / bitrate) * 1000, estimated: true };
   }
 
   return null;
+}
+
+/**
+ * The size of one MPEG Layer III frame, in bytes.
+ *
+ * The version comes from the codec string music-metadata already returns
+ * (`MPEG 1 Layer 3`, `MPEG 2 Layer 3`, `MPEG 2.5 Layer 3`) and decides the
+ * coefficient: Layer III codes 1152 samples per frame on MPEG-1 and 576 below
+ * it, so the byte formula halves from 144 to 72.
+ *
+ * Returns null when anything needed is unknown — a file we cannot measure must
+ * not be rejected for failing a measurement.
+ */
+export function mpegFrameBytes(
+  codec: string | undefined,
+  bitrateBps: number | null,
+  sampleRateHz: number | null,
+): number | null {
+  // `!bitrateBps` already rejects 0, null and NaN, so an explicit `<= 0` after
+  // it would be dead. A negative would yield a negative frame size, and
+  // `sizeBytes < negative` is false, so nothing is rejected on bad input.
+  if (!codec || !bitrateBps || !sampleRateHz) return null;
+  const version = /MPEG\s*([\d.]+)/i.exec(codec)?.[1];
+  if (version === undefined) return null;
+  const coefficient = version === '1' ? 144 : 72;
+  return Math.floor((coefficient * bitrateBps) / sampleRateHz);
 }
 
 /**
@@ -86,15 +129,27 @@ export function toFacts(metadata: IAudioMetadata, sizeBytes: number): AudioFacts
     throw invalidAudio('not_layer_3');
   }
 
-  const durationMs = resolveDurationMs(metadata, sizeBytes);
-  if (durationMs === null || durationMs <= 0) {
+  const bitrateBps = metadata.format.bitrate ?? null;
+  const sampleRateHz = metadata.format.sampleRate ?? null;
+
+  // A file too small to hold a single frame carries a readable header and no
+  // decodable audio. Every player produces silence from it, and accepting it
+  // means storing a fragment and reporting a duration measured in milliseconds.
+  const frameBytes = mpegFrameBytes(codec, bitrateBps, sampleRateHz);
+  if (frameBytes !== null && sizeBytes < frameBytes) {
+    throw invalidAudio('incomplete_frame');
+  }
+
+  const resolved = resolveDurationMs(metadata, sizeBytes);
+  if (resolved === null || resolved.durationMs <= 0) {
     throw invalidAudio('no_duration');
   }
 
   return {
-    durationMs,
-    bitrateBps: metadata.format.bitrate ?? null,
-    sampleRateHz: metadata.format.sampleRate ?? null,
+    durationMs: resolved.durationMs,
+    durationIsEstimated: resolved.estimated,
+    bitrateBps,
+    sampleRateHz,
     channels: metadata.format.numberOfChannels ?? null,
     codec,
     encodingMode: toEncodingMode(metadata.format.codecProfile),

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  mpegFrameBytes,
   readAudioFacts,
   resolveDurationMs,
   storableBitrate,
@@ -7,6 +8,7 @@ import {
   toFacts,
 } from './metadata.js';
 import { readAudioFactsFromBuffer } from '../../test/helpers/audio.js';
+import { frameSize } from '../../test/helpers/synthesize-mp3.js';
 import type { IAudioMetadata } from 'music-metadata';
 import { AppError } from '../http/errors.js';
 import { expectedDurationMs, synthesizeMp3 } from '../../test/helpers/synthesize-mp3.js';
@@ -122,10 +124,10 @@ describe('toEncodingMode', () => {
 });
 
 describe('resolveDurationMs', () => {
-  it('prefers the parser own duration', () => {
+  it('prefers the parser own duration, and marks it authoritative', () => {
     expect(
       resolveDurationMs(meta({ duration: 12.5, numberOfSamples: 999, sampleRate: 1 }), 0),
-    ).toBe(12_500);
+    ).toEqual({ durationMs: 12_500, estimated: false });
   });
 
   it.each([
@@ -135,15 +137,19 @@ describe('resolveDurationMs', () => {
     ['Infinity', Number.POSITIVE_INFINITY],
     ['a non-number', 'later' as unknown as number],
   ])('falls through when the duration is %s', (_label, duration) => {
-    // Tier two: sample count over sample rate.
+    // Tier two: sample count over sample rate, still authoritative.
     expect(
       resolveDurationMs(meta({ duration, numberOfSamples: 44_100, sampleRate: 44_100 }), 0),
-    ).toBe(1000);
+    ).toEqual({ durationMs: 1000, estimated: false });
   });
 
-  it('falls back to a CBR estimate when there is no sample count', () => {
-    // 16000 bytes at 128 kbps = 1 second.
-    expect(resolveDurationMs(meta({ bitrate: 128_000 }), 16_000)).toBe(1000);
+  it('falls back to a CBR estimate, and flags it as estimated', () => {
+    // 16000 bytes at 128 kbps = 1 second. The flag is the point: this number
+    // is derived from the size, so nothing may use it to judge the size.
+    expect(resolveDurationMs(meta({ bitrate: 128_000 }), 16_000)).toEqual({
+      durationMs: 1000,
+      estimated: true,
+    });
   });
 
   it.each([
@@ -157,16 +163,58 @@ describe('resolveDurationMs', () => {
   });
 });
 
+describe('mpegFrameBytes', () => {
+  it.each([
+    ['MPEG-1 128 kbps / 44.1 kHz', 'MPEG 1 Layer 3', 128_000, 44_100, 417],
+    ['MPEG-1 320 kbps / 48 kHz', 'MPEG 1 Layer 3', 320_000, 48_000, 960],
+    ['MPEG-2 64 kbps / 22.05 kHz', 'MPEG 2 Layer 3', 64_000, 22_050, 208],
+    ['MPEG-2.5 32 kbps / 11.025 kHz', 'MPEG 2.5 Layer 3', 32_000, 11_025, 208],
+    // No space after MPEG: the version pattern allows it, and a parser that
+    // spells the codec that way must not silently fall back to MPEG-2 sizing.
+    ['a codec string with no space', 'MPEG1 Layer 3', 128_000, 44_100, 417],
+  ])('%s -> %i bytes', (_label, codec, bitrate, rate, expected) => {
+    expect(mpegFrameBytes(codec, bitrate, rate)).toBe(expected);
+  });
+
+  it('agrees with the frame size the test generator emits', () => {
+    // If these two ever disagree, one of them is wrong and every audio
+    // assertion built on the generator is suspect.
+    for (const [codec, kbps, rate] of [
+      ['MPEG 1 Layer 3', 128, 44_100],
+      ['MPEG 1 Layer 3', 320, 48_000],
+      ['MPEG 2 Layer 3', 64, 22_050],
+      ['MPEG 2.5 Layer 3', 32, 11_025],
+    ] as const) {
+      expect(mpegFrameBytes(codec, kbps * 1000, rate)).toBe(frameSize(kbps, rate));
+    }
+  });
+
+  it.each([
+    ['no codec', undefined, 128_000, 44_100],
+    ['an unparseable codec', 'Opus', 128_000, 44_100],
+    ['no bitrate', 'MPEG 1 Layer 3', null, 44_100],
+    ['no sample rate', 'MPEG 1 Layer 3', 128_000, null],
+    ['a zero bitrate', 'MPEG 1 Layer 3', 0, 44_100],
+    ['a zero sample rate', 'MPEG 1 Layer 3', 128_000, 0],
+    ['a NaN bitrate', 'MPEG 1 Layer 3', Number.NaN, 44_100],
+  ])('returns null given %s, so nothing is rejected for being unmeasurable', (_l, c, b, r) => {
+    expect(mpegFrameBytes(c, b, r)).toBeNull();
+  });
+});
+
 describe('toFacts', () => {
   const ok = { container: 'MPEG', codec: 'MPEG 1 Layer 3', duration: 2, bitrate: 128_000 };
 
   it('builds facts from a usable parse result', () => {
+    // 100 frames' worth. A size below one frame is now rejected outright, and
+    // 100 bytes of 128 kbps audio was never a realistic fixture.
     const facts = toFacts(
       meta({ ...ok, sampleRate: 44_100, numberOfChannels: 2, codecProfile: 'CBR' }),
-      100,
+      41_700,
     );
     expect(facts).toEqual({
       durationMs: 2000,
+      durationIsEstimated: false,
       bitrateBps: 128_000,
       sampleRateHz: 44_100,
       channels: 2,
@@ -207,6 +255,44 @@ describe('toFacts', () => {
     } catch (error) {
       expect((error as AppError).details).toEqual({ reason });
     }
+  });
+});
+
+describe('toFacts and files too small to decode', () => {
+  const header = {
+    container: 'MPEG',
+    codec: 'MPEG 1 Layer 3',
+    bitrate: 320_000,
+    sampleRate: 48_000,
+  };
+
+  it('rejects a file smaller than one frame', () => {
+    // 320 kbps at 48 kHz is a 960-byte frame. 400 bytes is a readable header
+    // and no decodable audio, and previously scored 10/10.
+    expect(() => toFacts(meta(header), 400)).toThrowError(
+      expect.objectContaining({ code: 'INVALID_AUDIO' }),
+    );
+    try {
+      toFacts(meta(header), 400);
+    } catch (error) {
+      expect((error as AppError).details).toEqual({ reason: 'incomplete_frame' });
+    }
+  });
+
+  it('accepts a file of exactly one frame', () => {
+    expect(toFacts(meta(header), 960).durationMs).toBeGreaterThan(0);
+  });
+
+  it('marks a size-derived duration as estimated', () => {
+    const facts = toFacts(meta(header), 96_000);
+    expect(facts.durationIsEstimated).toBe(true);
+  });
+
+  it('does not reject a short file whose size cannot be measured', () => {
+    // No bitrate means no frame size, and a file must never be rejected for
+    // failing a measurement that could not be taken.
+    const unmeasurable = { container: 'MPEG', codec: 'MPEG 1 Layer 3', duration: 2 };
+    expect(toFacts(meta(unmeasurable), 10).durationMs).toBe(2000);
   });
 });
 

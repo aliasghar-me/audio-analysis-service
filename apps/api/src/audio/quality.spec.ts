@@ -145,6 +145,28 @@ describe('scoreQuality', () => {
     expect(scoreQuality(input(overrides)).breakdown.consistency).toBe(0.75);
   });
 
+  it('declines to judge consistency when the duration was estimated from the size', () => {
+    // The estimate is sizeBytes x 8 / bitrate, so comparing the size against it
+    // is comparing a number with itself: the ratio is 1.0 for every file,
+    // including a truncated one. Saying nothing is the honest answer.
+    const estimated = scoreQuality(input({ durationIsEstimated: true }));
+    expect(estimated.breakdown.consistency).toBe(0.75);
+  });
+
+  it('judges consistency normally when the duration is authoritative', () => {
+    expect(scoreQuality(input({ durationIsEstimated: false })).breakdown.consistency).toBe(1);
+    // Absent means authoritative, so existing callers are unaffected.
+    expect(scoreQuality(input({})).breakdown.consistency).toBe(1);
+  });
+
+  it('still catches a truncated file whose duration is known independently', () => {
+    // The case the check exists for: real duration, missing bytes.
+    const truncated = scoreQuality(
+      input({ bitrateBps: 320_000, durationMs: 180_000, sizeBytes: 1_000_000 }),
+    );
+    expect(truncated.breakdown.consistency).toBe(0);
+  });
+
   it('still judges consistency when only one half of the guard would trip', () => {
     expect(
       scoreQuality(input({ bitrateBps: 128_000, durationMs: 180_000 })).breakdown.consistency,

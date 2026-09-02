@@ -171,13 +171,42 @@ describe('POST /api/upload — rejections', () => {
     await expectNothingPersisted();
   });
 
-  it('rejects a truncated MP3', async () => {
+  it('rejects a file too short to sniff', async () => {
+    // Three bytes: this exercises the magic-byte gate, not truncation. It was
+    // once named "rejects a truncated MP3", which is why a genuinely truncated
+    // file went unnoticed through 100% coverage and a 92% mutation score.
     const response = await harness.app.inject(
       uploadRequest(synthesizeMp3({ frames: 1200 }).subarray(0, 3)),
     );
     expect(response.statusCode).toBe(400);
     expect(response.json().error.code).toBe('INVALID_AUDIO');
     await expectNothingPersisted();
+  });
+
+  it('rejects a genuinely truncated MP3 — a readable header with no full frame', async () => {
+    // 320 kbps at 48 kHz is a 960-byte frame. 400 bytes carries a valid header
+    // and no decodable audio; it used to be accepted and scored 10 out of 10.
+    const fragment = synthesizeMp3({ bitrateKbps: 320, sampleRate: 48_000, frames: 50 }).subarray(
+      0,
+      400,
+    );
+    const response = await harness.app.inject(uploadRequest(fragment, { filename: 'cut.mp3' }));
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe('INVALID_AUDIO');
+    expect(response.json().error.details.reason).toBe('incomplete_frame');
+    await expectNothingPersisted();
+  });
+
+  it('accepts a file of exactly one frame', async () => {
+    // The boundary the rejection sits on: one complete frame is decodable.
+    const oneFrame = synthesizeMp3({ bitrateKbps: 320, sampleRate: 48_000, frames: 1 });
+    expect(oneFrame.length).toBe(960);
+
+    const response = await harness.app.inject(uploadRequest(oneFrame, { filename: 'tiny.mp3' }));
+    expect(response.statusCode).toBe(201);
+    // Far under the 5 s floor, so it is stored and flagged rather than refused.
+    expect(response.json().analysis.duration.isOutlier).toBe(true);
   });
 
   it('rejects an empty file', async () => {
