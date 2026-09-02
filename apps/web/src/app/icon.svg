@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Audio Analysis">
+  <!--
+    The wordmark's seven hexagons are the brand, and they are unreadable at
+    16px — seven 4px shapes with graded opacity resolve to a smudge. So the
+    favicon keeps what survives the size (one hexagon, the coral) and spends
+    the remaining pixels saying what the service is: three waveform bars.
+    Three, not five, because at 16px each bar is barely 2px wide and any more
+    of them close up into a block.
+  -->
+  <path d="M16 1.5 27.3 8v13L16 27.5 4.7 21V8z" fill="#e8663c"/>
+  <g fill="#fff">
+    <rect x="10.6" y="12.4" width="2.6" height="7.2" rx="1.3"/>
+    <rect x="14.7" y="9.2"  width="2.6" height="13.6" rx="1.3"/>
+    <rect x="18.8" y="13.8" width="2.6" height="4.4" rx="1.3"/>
+  </g>
+</svg>

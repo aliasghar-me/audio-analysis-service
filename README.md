@@ -3,7 +3,7 @@
 Upload an MP3, get back its duration, an encoding-quality score out of 10, and whether those exact bytes have been uploaded before. A small Fastify + PostgreSQL service with a one-screen Next.js UI.
 
 ```bash
-curl -F "file=@song.mp3" http://localhost:4490/api/upload
+curl -F "file=@song.mp3" https://audio-analysis.aliasghar.me/api/upload
 ```
 
 ```json
@@ -19,6 +19,26 @@ curl -F "file=@song.mp3" http://localhost:4490/api/upload
   }
 }
 ```
+
+---
+
+## Production
+
+Deployed and reachable over HTTPS:
+
+|                |                                                  |
+| -------------- | ------------------------------------------------ |
+| **App**        | <https://audio-analysis.aliasghar.me>            |
+| **Upload API** | <https://audio-analysis.aliasghar.me/api/upload> |
+| **Health**     | <https://audio-analysis.aliasghar.me/health>     |
+
+A single VPS: Docker Compose, PostgreSQL 17 on a named volume, uploaded audio on
+a second named volume, behind the Traefik instance that already terminates TLS
+on that host with a Let's Encrypt certificate. No service in the stack publishes
+a host port — Postgres is unreachable from the internet by construction, not by
+a firewall rule that can be relaxed by accident. How it is put together, and why
+it attaches to the existing proxy instead of standing up its own:
+**[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
 
 ---
 
@@ -55,9 +75,22 @@ of storage and databases" the brief asks for.
 
 **Deliberately not here**
 
-Auth, rate limiting, queues, Redis, S3, Kubernetes, virus scanning, and any DSP
-or ML audio analysis. Each is argued in [What is deliberately not here](#what-is-deliberately-not-here)
-and [With more time](#with-more-time).
+Authentication · rate limiting · Redis · queues · Kafka · Kubernetes · an
+S3/object-storage abstraction · virus scanning · ML · DSP or perceptual audio
+analysis · microservices.
+
+None of these are oversights, and none are hard. They are absent because the
+brief describes one endpoint that analyses a file, and every one of them would
+add an operational dependency, a failure mode, and a page of configuration
+without making that endpoint answer any better. A queue in particular is the
+tempting one — and analysis here is header parsing that finishes in
+milliseconds, so a queue would replace a synchronous answer with a polling
+protocol and a job table in exchange for nothing.
+
+The threshold each would need to cross is written down in
+[What is deliberately not here](#what-is-deliberately-not-here) and
+[With more time](#with-more-time), because "we would add it when X" is a more
+useful answer than "we did not need it".
 
 ---
 
@@ -182,6 +215,95 @@ Every error uses one envelope:
 | `INTERNAL_ERROR`         | 500    | a bug; the real error goes to the log only                                                                    |
 
 `docs/api.http` has ready-to-run requests for every one of these.
+
+<details>
+<summary><b>Full request and response, captured from production</b></summary>
+
+```bash
+curl -F "file=@midnight-drive.mp3" https://audio-analysis.aliasghar.me/api/upload
+```
+
+`multipart/form-data`, one part, field name **`file`**, an MP3 up to 50 MiB.
+Nothing else is read from the request — not the extension, not the client's
+`Content-Type`.
+
+**`201 Created`** — these bytes were not on record:
+
+```json
+{
+  "duplicate": false,
+  "submittedFilename": "midnight-drive.mp3",
+  "originalUploadId": null,
+  "upload": {
+    "id": "01a060e2-300e-711e-9873-fef0d267d408",
+    "filename": "midnight-drive.mp3",
+    "contentHash": "5fb37b034ba627feeab45e397e37f9b0150983e0ab62af8e26618a02170723d6",
+    "sizeBytes": 222936,
+    "duplicateCount": 0,
+    "createdAt": "2026-09-02T06:50:31.310Z",
+    "lastUploadedAt": "2026-09-02T06:50:31.310Z"
+  },
+  "analysis": {
+    "duration": {
+      "ms": 18528,
+      "seconds": 18.528,
+      "formatted": "00:19",
+      "isOutlier": false,
+      "outlierPolicy": {
+        "minSeconds": 5,
+        "maxSeconds": 600
+      }
+    },
+    "quality": {
+      "score": 7,
+      "max": 10,
+      "basis": "encoding",
+      "breakdown": {
+        "total": 6.75,
+        "bitrate": 1.25,
+        "channels": 0.5,
+        "sampleRate": 3,
+        "consistency": 1,
+        "encodingMode": 1
+      }
+    },
+    "format": {
+      "codec": "MPEG 1 Layer 3",
+      "bitrateBps": 96231,
+      "sampleRateHz": 48000,
+      "channels": 1,
+      "encodingMode": "VBR"
+    }
+  }
+}
+```
+
+**`200 OK`** — the same bytes again, under a completely different name. No new
+row, no second file on disk, and `submittedFilename` is echoed beside the name
+already on record so a client can show both:
+
+```json
+{
+  "duplicate": true,
+  "submittedFilename": "Copy of MIDNIGHT (2).MP3",
+  "originalUploadId": "01a060e2-300e-711e-9873-fef0d267d408",
+  "upload": {
+    "id": "01a060e2-300e-711e-9873-fef0d267d408",
+    "filename": "midnight-drive.mp3",
+    "contentHash": "5fb37b034ba627feeab45e397e37f9b0150983e0ab62af8e26618a02170723d6",
+    "duplicateCount": 1,
+    "createdAt": "2026-09-02T06:50:31.310Z",
+    "lastUploadedAt": "2026-09-02T06:50:32.509Z"
+  },
+  "analysis": "\u2026 identical to the original upload's analysis \u2026"
+}
+```
+
+`200` rather than `201` because nothing was created, and rather than `409`
+because nothing failed — the client asked what these bytes are and got a
+complete, correct answer.
+
+</details>
 
 **One file per request.** The file must arrive in a form field named `file`, and a second file part is refused with `TOO_MANY_FILES` rather than silently ignored. This is enforced in the route rather than through `@fastify/multipart`'s `limits.files`, and that is not a stylistic preference: busboy trips a `files` cap _while the first file's stream is still open_, then stops parsing, so the stream never ends, the handler never returns, and the request hangs with no response at all. `fileSize` is the one limit that fails cleanly — it ends the stream and sets `truncated`. There are tests asserting the request answers rather than hangs.
 
@@ -317,19 +439,26 @@ It is a transparent point table rather than a tuned formula on purpose: every nu
 ## Testing
 
 ```bash
-pnpm test:unit          # 301 tests, no database, ~1s
+pnpm test:unit          # 326 tests, no database, ~1s
 pnpm test:security      # 55 tests — the security gate, kept separate on purpose
-pnpm test:integration   # 65 tests against real Postgres
+pnpm test:integration   # 68 tests against real Postgres
 pnpm test:coverage      # those three, with the 100% coverage gate
 pnpm test:large         # 5 tests at real 50 MB sizes; its own CI job
 pnpm test:mutation      # mutation testing over the pure modules
 pnpm verify             # typecheck + lint + format + test:coverage
 ```
 
-**426 tests across four suites**, with statements, branches, functions and lines
-all at **100%** and a mutation score of **92.2%**. `pnpm verify` runs the first
-three suites (421 tests) with the coverage gate and is what CI runs on every
-push; the 50 MB suite is a parallel job and mutation testing runs weekly.
+**454 tests across four suites**, with statements, branches, functions and lines
+all at **100%** (410/410, 264/264, 77/77, 359/359) and a mutation score of
+**92.93%**. `pnpm verify` runs the first three suites (**449 tests**) with the
+coverage gate and is what CI runs on every push; the 50 MB suite is a parallel
+job and mutation testing runs weekly.
+
+The gate is not decorative. Reaching 100% removed three pieces of genuinely dead
+code, mutation testing exposed a presenter that no test actually asserted on
+(scored 15%), and the most recent addition came from the deployed service rather
+than the suite: a `multipart/form-data` request with no `boundary` parameter was
+answering `500` instead of `400`.
 
 Nothing is mocked in the integration suite — a mocked unique constraint would
 prove nothing about the concurrency behaviour it exists to check. There are no
@@ -340,6 +469,37 @@ and **[docs/SECURITY.md](docs/SECURITY.md)**. Runnable requests for every
 endpoint and error: **[docs/api.http](docs/api.http)**. Putting it on a server,
 and why it uses the reverse proxy already running there rather than the Nginx
 the recipe usually calls for: **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
+
+---
+
+## Security
+
+This endpoint accepts arbitrary bytes from anyone, so the security tests are a
+separate gate (55 of them) rather than a few cases mixed into the upload suite.
+
+- **Content, not filename, decides everything.** The stored path is
+  `audio/<aa>/<bb>/<sha256>.mp3`, derived from the hash. A filename of
+  `../../../etc/passwd.mp3` is stored as a string in a column and never touches
+  a path — traversal is absent by construction rather than filtered.
+- **The file is validated as an MP3**, not trusted by extension or by the
+  client's `Content-Type`. A `.txt` renamed `.mp3` is rejected on its bytes.
+- **No shell, anywhere.** Headers are parsed in-process by `music-metadata`;
+  there is no `child_process` in the codebase, so command injection has no
+  surface to attack rather than a sanitiser to get right.
+- **Bounded input.** A 50 MiB cap enforced mid-stream, plus part and field
+  limits, and the hash is computed in a single streaming pass so a large upload
+  is never held in memory.
+- **Controlled errors.** One handler, one response shape. Anything unrecognised
+  becomes a generic `INTERNAL_ERROR`; stack traces, filesystem paths, SQL and
+  connection strings stay in the log. Tests assert the absence of each.
+- **Parameterised queries throughout** (Prisma), and `storagePath` is never
+  serialised into a response.
+
+Not claimed: this is not an audited or hardened deployment. There is no
+authentication, no rate limiting and no malware scanning — see
+[Scope](#scope) for why, and [With more time](#with-more-time) for what would
+come first. What each test actually proves:
+**[docs/SECURITY.md](docs/SECURITY.md)**.
 
 ---
 
