@@ -10,6 +10,10 @@ export const ERROR_STATUS = {
   UNSUPPORTED_MEDIA_TYPE: 415,
   /** Multipart, but with no `file` part in it. */
   NO_FILE: 400,
+  /** The Content-Type is one we accept but the body does not parse as it —
+   *  a missing boundary parameter, most often. Distinct from
+   *  UNSUPPORTED_MEDIA_TYPE, which means we do not speak that type at all. */
+  MALFORMED_MULTIPART: 400,
   /** More than one file part. One upload per request, by design. */
   TOO_MANY_FILES: 400,
   /** The multipart body had more parts or fields than we will parse. */

@@ -255,6 +255,31 @@ describe('POST /api/upload — rejections', () => {
     expect(response.json().error.code).toBe('UNSUPPORTED_MEDIA_TYPE');
     await expectNothingPersisted();
   });
+
+  it('rejects multipart/form-data sent without a boundary', async () => {
+    // Found in production, not by this suite: `Content-Type: multipart/form-data`
+    // with the boundary parameter missing. It is what a hand-written client or a
+    // proxy that rewrites headers actually sends, and busboy answers it by
+    // throwing a bare `Error('Multipart: Boundary not found')` — no `code`, no
+    // `statusCode`, so it fell through every branch of the error handler and was
+    // reported as a 500. The content type is one we support and the body is
+    // malformed, so this is a 400: the client can fix it, and a server-fault
+    // status would put a phantom outage in the logs.
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: '/api/upload',
+      headers: { 'content-type': 'multipart/form-data' },
+      payload: 'not really a multipart body',
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe('MALFORMED_MULTIPART');
+    // The parser's own wording names an internal dependency; it must not be
+    // what the client is told.
+    expect(JSON.stringify(response.json())).not.toContain('busboy');
+    expect(JSON.stringify(response.json())).not.toContain('Boundary not found');
+    await expectNothingPersisted();
+  });
 });
 
 describe('POST /api/upload — size limit', () => {

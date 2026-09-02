@@ -168,6 +168,7 @@ Every error uses one envelope:
 | ------------------------ | ------ | ------------------------------------------------------------------------------------------------------------- |
 | `UNSUPPORTED_MEDIA_TYPE` | 415    | the request was not `multipart/form-data`                                                                     |
 | `NO_FILE`                | 400    | no file part, or it arrived under the wrong field name                                                        |
+| `MALFORMED_MULTIPART`    | 400    | the type is `multipart/form-data` but the body does not parse as it — usually a missing `boundary` parameter  |
 | `TOO_MANY_FILES`         | 400    | more than one file part; one upload per request                                                               |
 | `EMPTY_FILE`             | 400    | zero bytes                                                                                                    |
 | `INVALID_AUDIO`          | 400    | `details.reason`: `magic_bytes`, `parse_failed`, `not_mpeg`, `not_layer_3`, `incomplete_frame`, `no_duration` |

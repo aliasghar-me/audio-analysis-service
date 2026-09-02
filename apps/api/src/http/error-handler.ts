@@ -30,6 +30,35 @@ const MULTIPART_ERRORS: Record<string, { code: ErrorCode; message: string }> = {
 };
 
 /**
+ * Errors busboy throws by `message` alone.
+ *
+ * Everything else multipart raises is a Fastify error with a `code`, handled by
+ * the table above. These two are thrown from busboy's parser selection as bare
+ * `Error`s — no `code`, no `statusCode` — so without this they fall through
+ * every branch below and are answered as a 500.
+ *
+ * That is not a hypothetical. `Content-Type: multipart/form-data` with the
+ * boundary parameter missing is what a hand-written client or a header-rewriting
+ * proxy actually sends, and it was returning INTERNAL_ERROR in production: a
+ * client mistake logged as a server fault, which is how a phantom outage gets
+ * investigated at 2am.
+ *
+ * Matching on a message string is fragile and is done here only because busboy
+ * offers no other signal. Both strings are pinned by tests, so a busboy upgrade
+ * that reworded them fails the suite rather than silently regressing to 500.
+ */
+const BUSBOY_MESSAGE_ERRORS: Record<string, { code: ErrorCode; message: string }> = {
+  'Multipart: Boundary not found': {
+    code: 'MALFORMED_MULTIPART',
+    message: 'The multipart body could not be parsed. Is the boundary parameter missing?',
+  },
+  'Unsupported Content-Type.': {
+    code: 'UNSUPPORTED_MEDIA_TYPE',
+    message: 'This endpoint expects a multipart/form-data request.',
+  },
+};
+
+/**
  * Fastify's own framework errors already carry the right status — a request
  * with no Content-Type raises FST_ERR_CTP_INVALID_MEDIA_TYPE with statusCode
  * 415. Answering those with a blanket 500 would claim a server fault for what
@@ -85,6 +114,15 @@ export function registerErrorHandler(app: FastifyInstance): void {
     if (multipart) {
       const appError = new AppError(multipart.code, multipart.message);
       request.log.info({ err: error }, 'multipart request rejected');
+      return reply.code(appError.statusCode).send(appError.toEnvelope());
+    }
+
+    const errorMessage = (error as { message?: unknown }).message;
+    const busboy =
+      typeof errorMessage === 'string' ? BUSBOY_MESSAGE_ERRORS[errorMessage] : undefined;
+    if (busboy) {
+      const appError = new AppError(busboy.code, busboy.message);
+      request.log.info({ err: error }, 'malformed multipart request rejected');
       return reply.code(appError.statusCode).send(appError.toEnvelope());
     }
 
